@@ -51,9 +51,9 @@ import ar.gob.buenosaires.recs.go2hmi.ui.theme.TelemetryTextStyles
 import java.util.Locale
 
 /**
- * Mapa táctico vectorial en Compose `Canvas` del circuito Laguna de los Coipos (3.8 km, WP0–WP5).
+ * Mapa táctico vectorial en Compose del circuito Laguna de los Coipos (3.8 km, WP0–WP5).
  *
- * Representa de forma esquemática el espejo de agua, el Río de la Plata al Este, el trazo
+ * Representacion de forma esquemática el espejo de agua, el Río de la Plata al Este, el trazo
  * recorrido, el halo de foco térmico cuando la IR supera [RobotSafetyPolicy.THERMAL_LOCKOUT_TEMP_C]
  * y el indicador visual de datos antiguos ("CONGELADO") ante desconexión.
  */

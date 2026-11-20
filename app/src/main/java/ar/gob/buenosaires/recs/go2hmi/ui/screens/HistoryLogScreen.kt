@@ -63,9 +63,9 @@ private enum class HistoryFilter(val label: String) {
 }
 
 /**
- * Pantalla 3: Registro de auditoría local persistido en Room (`history_events`).
+ * Pantalla 3: Registro de auditoría local persistido en Room
  *
- * Permite filtrar por categoría e incluye confirmación previa antes de vaciar la base
+ * Filtra por categoría e incluye confirmación previa antes de vaciar la base
  * para evitar borrados accidentales durante la operación en campo.
  */
 @OptIn(ExperimentalMaterial3Api::class)

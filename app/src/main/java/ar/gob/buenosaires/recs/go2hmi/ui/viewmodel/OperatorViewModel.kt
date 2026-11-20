@@ -47,7 +47,6 @@ data class HmiUiState(
 /**
  * ViewModel principal de operación y supervisión del guardaparques.
  *
- * Responsabilidades:
  * - Combinar flujos de solo lectura de [Go2RobotRepository] y [RobotSimulationController]
  *   en un único [uiState] expuesto como `StateFlow<HmiUiState>`.
  * - Calcular si la telemetría quedó desactualizada (>= 5 s) y qué botones habilitar

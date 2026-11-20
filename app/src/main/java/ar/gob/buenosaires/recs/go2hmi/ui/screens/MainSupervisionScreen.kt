@@ -83,7 +83,7 @@ import java.util.Locale
 /**
  * Pantalla 2: Panel principal de supervisión HMI y control discreto del Unitree Go2 EDU.
  *
- * Estructura en 5 zonas:
+ * 5 zonas:
  * - Zona A: Barra superior con estado operativo, conectividad 4G, antigüedad de paquete y batería.
  * - Zona B: Tarjeta de mapa táctico (`TacticalMapCard`) sobre circuito Laguna de los Coipos.
  * - Zona C: Grilla con las 3 variables del servicio de prevención ígnea + barra de estado HRI.

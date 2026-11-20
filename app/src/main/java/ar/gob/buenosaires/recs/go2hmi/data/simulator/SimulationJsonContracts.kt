@@ -27,7 +27,7 @@ import kotlinx.serialization.json.put
 /**
  * Contratos JSON internos para simular la comunicación entre la app y el Go2.
  *
- * Aclaración: este formato es propio del TP para desacoplar el simulador con
+ * Aclaración: este formato propio del TP para desacoplar el simulador con
  * `kotlinx.serialization`; no representa el protocolo oficial de Unitree.
  */
 data class AlertDto(

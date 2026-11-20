@@ -49,11 +49,9 @@ import ar.gob.buenosaires.recs.go2hmi.ui.theme.LocalHmiSemanticColors
 import ar.gob.buenosaires.recs.go2hmi.ui.theme.TelemetryTextStyles
 
 /**
- * Pantalla 1: Selección de Unidades Cuadrúpedas asignadas a la RECS.
+ * Pantalla 1: Selección de Unidades
  *
- * Muestra la unidad activa (`GO2-RECS-01`) reflejando su estado real de enlace,
- * batería y waypoint actual, junto a una segunda unidad de reserva en estado
- * deshabilitado estándar Material 3 (opacidad 12%/38%) para evidenciar precondiciones.
+ * Muestra la unidad activa junto a una segunda unidad de reserva en estado deshabilitado
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

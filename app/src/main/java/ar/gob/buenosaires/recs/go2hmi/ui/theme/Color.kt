@@ -2,7 +2,9 @@ package ar.gob.buenosaires.recs.go2hmi.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Static Tactical Outdoor Dark M3 palette (dynamicColor = false)
+/**
+ * Paleta estatica de colores. No permite colores basados en el wallpaper o tema del dispositivo
+ */
 val TacticalBackground = Color(0xFF0F1419)
 val TacticalSurface = Color(0xFF0F1419)
 val TacticalSurfaceContainer = Color(0xFF1A2129)
