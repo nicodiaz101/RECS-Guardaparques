@@ -4,6 +4,8 @@ Aplicación Android nativa (Kotlin + Jetpack Compose + Material 3 + Room + Corou
 
 Simula de forma 100% offline la operación supervisada e interacción humano-robot (HRI) de un cuadrúpedo **Unitree Go2 EDU (`GO2-RECS-01`)** asistiendo al cuerpo de guardaparques de la **Reserva Ecológica Costanera Sur (RECS)** en patrullajes preventivos contra focos ígneos.
 
+<img width="334" height="720" alt="screenrecording-2026-11-20_14-26-31_trimmed-720p" src="https://github.com/user-attachments/assets/58ac3240-b7c1-4460-867b-76e7c3a03014" />
+
 ---
 
 ## 1. Caso de uso, entorno y plataforma
