@@ -6,6 +6,13 @@ import ar.gob.buenosaires.recs.go2hmi.domain.model.AlertSeverity
 import ar.gob.buenosaires.recs.go2hmi.domain.model.HistoryEventCategory
 import ar.gob.buenosaires.recs.go2hmi.domain.model.HistoryEventItem
 
+/**
+ * Entidad Room que persiste cada evento relevante de patrulla o contingencia en SQLite.
+ *
+ * Se almacena en `data/local/room` y se mapea explícitamente hacia el modelo puro
+ * [HistoryEventItem] de `domain` mediante [toDomain], evitando acoplar la capa de
+ * dominio o presentación con anotaciones de persistencia.
+ */
 @Entity(tableName = "history_events")
 data class HistoryEventEntity(
     @PrimaryKey(autoGenerate = true)
@@ -18,6 +25,9 @@ data class HistoryEventEntity(
     val waypointCode: String,
     val coordinates: String
 ) {
+    /**
+     * Convierte la fila de Room a objeto de dominio con fallback seguro ante enums desconocidos.
+     */
     fun toDomain(): HistoryEventItem = HistoryEventItem(
         id = id,
         timestampEpochMs = timestampEpochMs,

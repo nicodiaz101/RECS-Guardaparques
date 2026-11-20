@@ -13,6 +13,10 @@ import ar.gob.buenosaires.recs.go2hmi.domain.model.RobotCommandType
 import ar.gob.buenosaires.recs.go2hmi.domain.model.RobotOperationalState
 import ar.gob.buenosaires.recs.go2hmi.domain.model.SimulationScenario
 import ar.gob.buenosaires.recs.go2hmi.domain.model.TelemetrySnapshot
+import ar.gob.buenosaires.recs.go2hmi.domain.policy.CommandValidationResult
+import ar.gob.buenosaires.recs.go2hmi.domain.policy.RobotSafetyPolicy
+import ar.gob.buenosaires.recs.go2hmi.domain.util.SystemTimeProvider
+import ar.gob.buenosaires.recs.go2hmi.domain.util.TimeProvider
 import java.util.Locale
 import kotlin.math.atan2
 import kotlin.math.roundToInt
@@ -20,6 +24,8 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,50 +38,67 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-sealed class SimulationDomainEvent {
-    data class MissionStarted(val missionId: String, val waypointCode: String, val coordinates: String, val epochMs: Long) : SimulationDomainEvent()
-    data class MissionCompleted(val missionId: String, val waypointCode: String, val coordinates: String, val epochMs: Long) : SimulationDomainEvent()
-    data class AlertTriggered(val alert: RobotAlert, val waypointCode: String, val coordinates: String) : SimulationDomainEvent()
-    data class AlertAcknowledged(val alertTitle: String, val waypointCode: String, val coordinates: String, val epochMs: Long) : SimulationDomainEvent()
-}
-
 /**
  * Motor autónomo 100% offline que simula el Unitree Go2 EDU recorriendo
  * el circuito Laguna de los Coipos (3.8 km, WP0..WP5) con contratos JSON internos.
+ *
+ * Responsabilidades principales:
+ * - Simular avance periódico por el sendero, consumo de batería y alertas orgánicas.
+ * - Validar cada comando recibido aplicando la misma [RobotSafetyPolicy] del dominio.
+ * - Simular latencia de red 4G (`networkLatencyMs`), pérdidas de enlace (`timeoutMs`) y
+ *   rechazos forzados para demostrar el ciclo PENDING -> CONFIRMED / REJECTED / NO_RESPONSE.
+ * - Realizar ida y vuelta por DTOs JSON (`SimulationJsonContracts.kt`) en cada actualización.
  */
 class Go2SimulationEngine(
     dispatcher: CoroutineDispatcher = Dispatchers.Default,
     autoStartLoop: Boolean = true,
     private val networkLatencyMs: Long = 450L,
-    private val timeoutMs: Long = 3000L
-) {
+    private val timeoutMs: Long = 3000L,
+    private val timeProvider: TimeProvider = SystemTimeProvider
+) : RobotTelemetryDataSource {
+
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val stateMutex = Mutex()
 
-    private val _telemetryJsonFlow = MutableStateFlow(TelemetryDto.fromDomain(initialSnapshot()).toJsonString())
+    private val _telemetryJsonFlow = MutableStateFlow(
+        TelemetryDto.fromDomain(initialSnapshot(timeProvider.nowEpochMs())).toJsonString()
+    )
     val telemetryJsonFlow: StateFlow<String> = _telemetryJsonFlow.asStateFlow()
 
-    private val _telemetryFlow = MutableStateFlow(TelemetryDto.fromJsonString(_telemetryJsonFlow.value).toDomain())
-    val telemetryFlow: StateFlow<TelemetrySnapshot> = _telemetryFlow.asStateFlow()
+    private val _telemetryFlow = MutableStateFlow(
+        TelemetryDto.fromJsonString(_telemetryJsonFlow.value).toDomain()
+    )
+    override val telemetryFlow: StateFlow<TelemetrySnapshot> = _telemetryFlow.asStateFlow()
 
-    private val _lastCommandStatusFlow = MutableStateFlow(CommandStatusReport())
-    val lastCommandStatusFlow: StateFlow<CommandStatusReport> = _lastCommandStatusFlow.asStateFlow()
+    private val _lastCommandStatusFlow = MutableStateFlow(
+        CommandStatusReport(timestampEpochMs = timeProvider.nowEpochMs())
+    )
+    override val lastCommandStatusFlow: StateFlow<CommandStatusReport> = _lastCommandStatusFlow.asStateFlow()
 
     private val _isForcedDisconnectedFlow = MutableStateFlow(false)
-    val isForcedDisconnectedFlow: StateFlow<Boolean> = _isForcedDisconnectedFlow.asStateFlow()
+    override val isForcedDisconnectedFlow: StateFlow<Boolean> = _isForcedDisconnectedFlow.asStateFlow()
 
     private val _isForceRejectNextCommandFlow = MutableStateFlow(false)
-    val isForceRejectNextCommandFlow: StateFlow<Boolean> = _isForceRejectNextCommandFlow.asStateFlow()
+    override val isForceRejectNextCommandFlow: StateFlow<Boolean> = _isForceRejectNextCommandFlow.asStateFlow()
 
     private val _activeScenarioFlow = MutableStateFlow(SimulationScenario.SCENARIO_1_NORMAL)
-    val activeScenarioFlow: StateFlow<SimulationScenario> = _activeScenarioFlow.asStateFlow()
+    override val activeScenarioFlow: StateFlow<SimulationScenario> = _activeScenarioFlow.asStateFlow()
+
+    private val _isPausedFromRthFlow = MutableStateFlow(false)
+    override val isPausedFromRthFlow: StateFlow<Boolean> = _isPausedFromRthFlow.asStateFlow()
 
     private val _domainEventsFlow = MutableSharedFlow<SimulationDomainEvent>(extraBufferCapacity = 32)
-    val domainEventsFlow: SharedFlow<SimulationDomainEvent> = _domainEventsFlow.asSharedFlow()
+    override val domainEventsFlow: SharedFlow<SimulationDomainEvent> = _domainEventsFlow.asSharedFlow()
 
     private var currentState: TelemetrySnapshot = _telemetryFlow.value
     private var tickCounter: Int = 0
     private var missionNumber: Int = 42
+
+    /** Recuerda si una pausa interrumpió PATROLLING o RETURNING_SAFE para reanudar sin perder rumbo. */
+    private var stateBeforePause: RobotOperationalState = RobotOperationalState.PATROLLING
+
+    /** Versión del escenario actual para ignorar respuestas atrasadas si el usuario cambia de escenario. */
+    private var scenarioGeneration: Long = 0L
 
     init {
         if (autoStartLoop) {
@@ -88,27 +111,81 @@ class Go2SimulationEngine(
         }
     }
 
-    suspend fun stepSimulationTick(nowEpochMs: Long = System.currentTimeMillis()) {
-        val completedEvent = stateMutex.withLock {
+    /**
+     * Avanza un ciclo de simulación (1 segundo simulado en tiempo acelerado).
+     * Si el enlace 4G está cortado, el snapshot queda congelado para reflejar datos antiguos.
+     */
+    suspend fun stepSimulationTick(nowEpochMs: Long = timeProvider.nowEpochMs()) {
+        val eventsToEmit = mutableListOf<SimulationDomainEvent>()
+
+        stateMutex.withLock {
             if (_isForcedDisconnectedFlow.value) {
-                return@withLock null
+                return@withLock
             }
 
             tickCounter++
             var updated = currentState
-            var missionDoneEvent: SimulationDomainEvent.MissionCompleted? = null
 
             when (updated.operationalState) {
                 RobotOperationalState.PATROLLING -> {
                     val nextProgress = (updated.missionProgressPercent + 4).coerceAtMost(100)
                     val nextBattery = if (tickCounter % 5 == 0) {
-                        (updated.batteryPercent - 1).coerceAtLeast(5)
+                        (updated.batteryPercent - 1).coerceAtLeast(RobotSafetyPolicy.CRITICAL_BATTERY_STOP_PERCENT)
                     } else {
                         updated.batteryPercent
                     }
 
-                    if (nextProgress >= 100) {
+                    val crossedLowBatteryThreshold =
+                        updated.batteryPercent > RobotSafetyPolicy.MIN_MISSION_BATTERY_PERCENT &&
+                            nextBattery <= RobotSafetyPolicy.MIN_MISSION_BATTERY_PERCENT
+
+                    if (nextProgress < 100 && crossedLowBatteryThreshold) {
+                        // Alerta orgánica cuando la batería cae al umbral mínimo durante patrulla
+                        val pos = interpolateCircuitPosition(nextProgress)
+                        val wp = RecsTrailWaypoints.byIndex(pos.waypointIndex)
+                        val alert = RobotAlert(
+                            id = "ALT-BATT-$nowEpochMs",
+                            severity = AlertSeverity.WARNING,
+                            category = AlertCategory.BATTERY,
+                            title = "Batería Baja ($nextBattery%)",
+                            description = "Batería al $nextBattery%: autonomía insuficiente para completar el circuito",
+                            waypointIndex = wp.index,
+                            isAcknowledged = false,
+                            timestampEpochMs = nowEpochMs
+                        )
+                        stateBeforePause = RobotOperationalState.PATROLLING
+                        _isPausedFromRthFlow.value = false
+                        updated = updated.copy(
+                            connectivityStatus = ConnectivityStatus.ONLINE,
+                            rssiDbm = -69,
+                            batteryPercent = nextBattery,
+                            voltageV = batteryToVoltage(nextBattery),
+                            operationalState = RobotOperationalState.PAUSED,
+                            currentWaypointIndex = wp.index,
+                            currentWaypointName = wp.name,
+                            missionProgressPercent = nextProgress,
+                            latitude = pos.latitude,
+                            longitude = pos.longitude,
+                            linearSpeedMps = 0.0f,
+                            headingDeg = pos.headingDeg,
+                            posture = "Pausa preventiva por batería baja ($nextBattery%)",
+                            activeAlerts = updated.activeAlerts + alert,
+                            lastUpdatedEpochMs = nowEpochMs,
+                            hriStatus = HriState(
+                                beaconMode = "Luz Ámbar Precaución",
+                                speakerAnnouncement = "Unidad en pausa preventiva por batería baja",
+                                isEmergencyAlarm = false
+                            )
+                        )
+                        eventsToEmit += SimulationDomainEvent.AlertTriggered(
+                            alert = alert,
+                            waypointCode = wp.code,
+                            coordinates = formatCoords(pos.latitude, pos.longitude)
+                        )
+                    } else if (nextProgress >= 100) {
                         val wp0 = RecsTrailWaypoints.byIndex(0)
+                        stateBeforePause = RobotOperationalState.PATROLLING
+                        _isPausedFromRthFlow.value = false
                         updated = updated.copy(
                             connectivityStatus = ConnectivityStatus.ONLINE,
                             rssiDbm = -64,
@@ -130,7 +207,7 @@ class Go2SimulationEngine(
                                 isEmergencyAlarm = false
                             )
                         )
-                        missionDoneEvent = SimulationDomainEvent.MissionCompleted(
+                        eventsToEmit += SimulationDomainEvent.MissionCompleted(
                             missionId = updated.missionId,
                             waypointCode = wp0.code,
                             coordinates = formatCoords(wp0.latitude, wp0.longitude),
@@ -160,12 +237,14 @@ class Go2SimulationEngine(
                 RobotOperationalState.RETURNING_SAFE -> {
                     val nextProgress = (updated.missionProgressPercent - 8).coerceAtLeast(0)
                     val nextBattery = if (tickCounter % 6 == 0) {
-                        (updated.batteryPercent - 1).coerceAtLeast(5)
+                        (updated.batteryPercent - 1).coerceAtLeast(RobotSafetyPolicy.CRITICAL_BATTERY_STOP_PERCENT)
                     } else {
                         updated.batteryPercent
                     }
                     if (nextProgress == 0) {
                         val wp0 = RecsTrailWaypoints.byIndex(0)
+                        stateBeforePause = RobotOperationalState.PATROLLING
+                        _isPausedFromRthFlow.value = false
                         updated = updated.copy(
                             connectivityStatus = ConnectivityStatus.ONLINE,
                             rssiDbm = -62,
@@ -220,52 +299,84 @@ class Go2SimulationEngine(
             }
 
             publishTelemetry(updated)
-            missionDoneEvent
         }
 
-        if (completedEvent != null) {
-            _domainEventsFlow.emit(completedEvent)
-        }
+        eventsToEmit.forEach { _domainEventsFlow.emit(it) }
     }
 
-    suspend fun processCommand(
+    /**
+     * Procesa una orden discreta a través del contrato JSON del robot.
+     *
+     * Se ejecuta dentro del scope del motor para que, incluso si la corrutina llamadora
+     * (p.ej. ViewModel) se cancela en mitad de la latencia simulada, el estado de comando
+     * resuelva limpiamente y nunca quede atascado en `PENDING`.
+     */
+    override suspend fun processCommand(
         command: RobotCommandType,
-        alertIdToAck: String? = null,
-        nowEpochMs: Long = System.currentTimeMillis()
+        alertIdToAck: String?,
+        nowEpochMs: Long?
+    ): CommandStatusReport = scope.async {
+        executeCommandInternal(
+            command = command,
+            alertIdToAck = alertIdToAck,
+            effectiveNow = nowEpochMs ?: timeProvider.nowEpochMs()
+        )
+    }.await()
+
+    private suspend fun executeCommandInternal(
+        command: RobotCommandType,
+        alertIdToAck: String?,
+        effectiveNow: Long
     ): CommandStatusReport {
         val requestJson = CommandRequestDto(
             command = command.name,
             alertIdToAck = alertIdToAck,
-            sentEpochMs = nowEpochMs
+            sentEpochMs = effectiveNow
         ).toJsonString()
         val parsedRequest = CommandRequestDto.fromJsonString(requestJson)
         val cmd = RobotCommandType.valueOf(parsedRequest.command)
 
-        _lastCommandStatusFlow.value = CommandStatusReport(
-            command = cmd,
-            state = CommandExecutionState.PENDING,
-            message = "⏳ PENDIENTE: Enviando orden '${cmd.label}' al Go2...",
-            timestampEpochMs = nowEpochMs
-        )
+        val (cmdGeneration, initiallyDisconnected) = stateMutex.withLock {
+            _lastCommandStatusFlow.value = CommandStatusReport(
+                command = cmd,
+                state = CommandExecutionState.PENDING,
+                message = "⏳ PENDIENTE: Enviando orden '${cmd.label}' al Go2...",
+                timestampEpochMs = effectiveNow
+            )
+            scenarioGeneration to _isForcedDisconnectedFlow.value
+        }
 
-        if (_isForcedDisconnectedFlow.value) {
+        if (initiallyDisconnected) {
             delay(timeoutMs)
-            val responseJson = CommandResponseDto(
-                command = cmd.name,
-                status = CommandExecutionState.NO_RESPONSE.name,
-                message = "⚠️ SIN RESPUESTA: Timeout de red 4G agotado tras ${timeoutMs / 1000}s",
-                timestampEpochMs = System.currentTimeMillis()
-            ).toJsonString()
-            val parsed = CommandResponseDto.fromJsonString(responseJson).toDomain()
-            _lastCommandStatusFlow.value = parsed
-            return parsed
+            return buildTimeoutReport(cmd = cmd, expectedGeneration = cmdGeneration)
         }
 
         delay(networkLatencyMs)
 
+        // Si el enlace se perdió mientras viajaba la orden, esperar resto del timeout y fallar.
+        val disconnectedMidFlight = stateMutex.withLock {
+            _isForcedDisconnectedFlow.value && scenarioGeneration == cmdGeneration
+        }
+        if (disconnectedMidFlight) {
+            delay((timeoutMs - networkLatencyMs).coerceAtLeast(0L))
+            return buildTimeoutReport(cmd = cmd, expectedGeneration = cmdGeneration)
+        }
+
         val eventsToEmit = mutableListOf<SimulationDomainEvent>()
-        val responseJson = stateMutex.withLock {
-            val respNow = System.currentTimeMillis()
+        var staleGeneration = false
+
+        val responseDto = stateMutex.withLock {
+            if (scenarioGeneration != cmdGeneration) {
+                staleGeneration = true
+                return@withLock CommandResponseDto(
+                    command = cmd.name,
+                    status = CommandExecutionState.NO_RESPONSE.name,
+                    message = "⚠️ SIN RESPUESTA: Escenario reiniciado durante el envío",
+                    timestampEpochMs = timeProvider.nowEpochMs()
+                )
+            }
+
+            val respNow = timeProvider.nowEpochMs()
             val s = currentState
 
             if (_isForceRejectNextCommandFlow.value) {
@@ -275,79 +386,131 @@ class Go2SimulationEngine(
                     status = CommandExecutionState.REJECTED.name,
                     message = "❌ RECHAZADA: Simulación de rechazo forzado por validación de seguridad Go2",
                     timestampEpochMs = respNow
-                ).toJsonString()
+                )
+            }
+
+            val currentWp = RecsTrailWaypoints.byIndex(s.currentWaypointIndex)
+            val isResumingRth = stateBeforePause == RobotOperationalState.RETURNING_SAFE
+            val validation = RobotSafetyPolicy.validateCommand(
+                command = cmd,
+                state = s,
+                waypointCode = currentWp.code,
+                isResumingRth = isResumingRth
+            )
+
+            if (validation is CommandValidationResult.Rejected) {
+                return@withLock CommandResponseDto(
+                    command = cmd.name,
+                    status = CommandExecutionState.REJECTED.name,
+                    message = validation.reasonMessage,
+                    timestampEpochMs = respNow
+                )
             }
 
             when (cmd) {
                 RobotCommandType.START_MISSION -> {
-                    when {
-                        s.batteryPercent <= 20 -> CommandResponseDto(
-                            command = cmd.name,
-                            status = CommandExecutionState.REJECTED.name,
-                            message = "❌ RECHAZADA: Batería en ${s.batteryPercent}% (<= 20%). Recargue o ejecute RTH.",
-                            timestampEpochMs = respNow
+                    missionNumber++
+                    val newMissionId = "MIS-#%03d".format(Locale.US, missionNumber)
+                    val wp0 = RecsTrailWaypoints.byIndex(0)
+                    stateBeforePause = RobotOperationalState.PATROLLING
+                    _isPausedFromRthFlow.value = false
+                    val next = s.copy(
+                        operationalState = RobotOperationalState.PATROLLING,
+                        missionId = newMissionId,
+                        currentWaypointIndex = 0,
+                        currentWaypointName = wp0.name,
+                        missionProgressPercent = 4,
+                        latitude = wp0.latitude,
+                        longitude = wp0.longitude,
+                        linearSpeedMps = 1.5f,
+                        posture = "Trote estable (Patrulla iniciada)",
+                        activeAlerts = emptyList(),
+                        maxThermalTempC = 24.2f,
+                        smokePpm = 12,
+                        fireWeatherRisk = FireRiskLevel.MODERADO,
+                        lastUpdatedEpochMs = respNow,
+                        hriStatus = HriState(
+                            beaconMode = "Luz Verde Cortesía",
+                            speakerAnnouncement = "Ronda Preventiva — Reserva Ecológica",
+                            isEmergencyAlarm = false
                         )
-                        s.operationalState == RobotOperationalState.PATROLLING -> CommandResponseDto(
-                            command = cmd.name,
-                            status = CommandExecutionState.REJECTED.name,
-                            message = "❌ RECHAZADA: El Go2 ya se encuentra patrullando (${s.missionId}).",
-                            timestampEpochMs = respNow
-                        )
-                        else -> {
-                            missionNumber++
-                            val newMissionId = "MIS-#%03d".format(Locale.US, missionNumber)
-                            val wp0 = RecsTrailWaypoints.byIndex(0)
-                            val next = s.copy(
-                                operationalState = RobotOperationalState.PATROLLING,
-                                missionId = newMissionId,
-                                currentWaypointIndex = 0,
-                                currentWaypointName = wp0.name,
-                                missionProgressPercent = 4,
-                                latitude = wp0.latitude,
-                                longitude = wp0.longitude,
-                                linearSpeedMps = 1.5f,
-                                posture = "Trote estable (Patrulla iniciada)",
-                                activeAlerts = emptyList(),
-                                maxThermalTempC = 24.2f,
-                                smokePpm = 12,
-                                fireWeatherRisk = FireRiskLevel.MODERADO,
-                                lastUpdatedEpochMs = respNow,
-                                hriStatus = HriState(
-                                    beaconMode = "Luz Verde Cortesía",
-                                    speakerAnnouncement = "Ronda Preventiva — Reserva Ecológica",
-                                    isEmergencyAlarm = false
-                                )
-                            )
-                            publishTelemetry(next)
-                            eventsToEmit += SimulationDomainEvent.MissionStarted(
-                                missionId = newMissionId,
-                                waypointCode = wp0.code,
-                                coordinates = formatCoords(wp0.latitude, wp0.longitude),
-                                epochMs = respNow
-                            )
-                            CommandResponseDto(
-                                command = cmd.name,
-                                status = CommandExecutionState.CONFIRMED.name,
-                                message = "✅ CONFIRMADA: $newMissionId iniciada por el Go2 (ACK)",
-                                timestampEpochMs = respNow
-                            )
-                        }
-                    }
+                    )
+                    publishTelemetry(next)
+                    eventsToEmit += SimulationDomainEvent.MissionStarted(
+                        missionId = newMissionId,
+                        waypointCode = wp0.code,
+                        coordinates = formatCoords(wp0.latitude, wp0.longitude),
+                        epochMs = respNow
+                    )
+                    CommandResponseDto(
+                        command = cmd.name,
+                        status = CommandExecutionState.CONFIRMED.name,
+                        message = "✅ CONFIRMADA: $newMissionId iniciada por el Go2 (ACK)",
+                        timestampEpochMs = respNow
+                    )
                 }
 
                 RobotCommandType.PAUSE_MISSION -> {
-                    if (s.operationalState == RobotOperationalState.PATROLLING ||
-                        s.operationalState == RobotOperationalState.RETURNING_SAFE
-                    ) {
+                    stateBeforePause = s.operationalState
+                    _isPausedFromRthFlow.value = (stateBeforePause == RobotOperationalState.RETURNING_SAFE)
+                    publishTelemetry(
+                        s.copy(
+                            operationalState = RobotOperationalState.PAUSED,
+                            linearSpeedMps = 0.0f,
+                            posture = "Detenido en sendero (Pausa operativa)",
+                            lastUpdatedEpochMs = respNow,
+                            hriStatus = HriState(
+                                beaconMode = "Luz Ámbar Espera",
+                                speakerAnnouncement = "Unidad en pausa operativa",
+                                isEmergencyAlarm = false
+                            )
+                        )
+                    )
+                    CommandResponseDto(
+                        command = cmd.name,
+                        status = CommandExecutionState.CONFIRMED.name,
+                        message = "✅ CONFIRMADA: Misión pausada en ${currentWp.code} (ACK)",
+                        timestampEpochMs = respNow
+                    )
+                }
+
+                RobotCommandType.RESUME_MISSION -> {
+                    val resumeToRth = s.operationalState == RobotOperationalState.PAUSED &&
+                        stateBeforePause == RobotOperationalState.RETURNING_SAFE
+                    stateBeforePause = RobotOperationalState.PATROLLING
+                    _isPausedFromRthFlow.value = false
+
+                    if (resumeToRth) {
                         publishTelemetry(
                             s.copy(
-                                operationalState = RobotOperationalState.PAUSED,
-                                linearSpeedMps = 0.0f,
-                                posture = "Detenido en sendero (Pausa operativa)",
+                                operationalState = RobotOperationalState.RETURNING_SAFE,
+                                linearSpeedMps = 1.8f,
+                                posture = "Evacuación RTH reanudada hacia WP0 Acceso Brasil",
                                 lastUpdatedEpochMs = respNow,
                                 hriStatus = HriState(
-                                    beaconMode = "Luz Ámbar Espera",
-                                    speakerAnnouncement = "Unidad en pausa operativa",
+                                    beaconMode = "Baliza Verde/Ámbar Retorno",
+                                    speakerAnnouncement = "Unidad retornando a Base Acceso Brasil",
+                                    isEmergencyAlarm = RobotSafetyPolicy.hasThermalHazard(s)
+                                )
+                            )
+                        )
+                        CommandResponseDto(
+                            command = cmd.name,
+                            status = CommandExecutionState.CONFIRMED.name,
+                            message = "✅ CONFIRMADA: Regreso a Punto Seguro (RTH) reanudado (ACK)",
+                            timestampEpochMs = respNow
+                        )
+                    } else {
+                        publishTelemetry(
+                            s.copy(
+                                operationalState = RobotOperationalState.PATROLLING,
+                                linearSpeedMps = 1.5f,
+                                posture = "Desvío lateral seguro • Reanudando patrulla",
+                                activeAlerts = emptyList(),
+                                lastUpdatedEpochMs = respNow,
+                                hriStatus = HriState(
+                                    beaconMode = "Luz Verde Cortesía",
+                                    speakerAnnouncement = "Ronda Preventiva en curso",
                                     isEmergencyAlarm = false
                                 )
                             )
@@ -355,74 +518,21 @@ class Go2SimulationEngine(
                         CommandResponseDto(
                             command = cmd.name,
                             status = CommandExecutionState.CONFIRMED.name,
-                            message = "✅ CONFIRMADA: Misión pausada en ${RecsTrailWaypoints.byIndex(s.currentWaypointIndex).code} (ACK)",
-                            timestampEpochMs = respNow
-                        )
-                    } else {
-                        CommandResponseDto(
-                            command = cmd.name,
-                            status = CommandExecutionState.REJECTED.name,
-                            message = "❌ RECHAZADA: Solo se puede pausar durante patrullaje o retorno.",
-                            timestampEpochMs = respNow
-                        )
-                    }
-                }
-
-                RobotCommandType.RESUME_MISSION -> {
-                    val hasUnackedAlert = s.activeAlerts.any { !it.isAcknowledged }
-                    when {
-                        s.maxThermalTempC >= 70.0f -> CommandResponseDto(
-                            command = cmd.name,
-                            status = CommandExecutionState.REJECTED.name,
-                            message = "RECHAZADA: Protección térmica activa (${formatTemp(s.maxThermalTempC)} °C). Prohibido avanzar hacia el fuego; solicite Regreso a Punto Seguro",
-                            timestampEpochMs = respNow
-                        )
-                        hasUnackedAlert -> CommandResponseDto(
-                            command = cmd.name,
-                            status = CommandExecutionState.REJECTED.name,
-                            message = "❌ RECHAZADA: Debe reconocer la alerta activa (ACK) antes de reanudar.",
-                            timestampEpochMs = respNow
-                        )
-                        s.operationalState == RobotOperationalState.PAUSED ||
-                        s.operationalState == RobotOperationalState.ALERT_HOLD -> {
-                            publishTelemetry(
-                                s.copy(
-                                    operationalState = RobotOperationalState.PATROLLING,
-                                    linearSpeedMps = 1.5f,
-                                    posture = "Desvío lateral seguro • Reanudando patrulla",
-                                    activeAlerts = emptyList(),
-                                    lastUpdatedEpochMs = respNow,
-                                    hriStatus = HriState(
-                                        beaconMode = "Luz Verde Cortesía",
-                                        speakerAnnouncement = "Ronda Preventiva en curso",
-                                        isEmergencyAlarm = false
-                                    )
-                                )
-                            )
-                            CommandResponseDto(
-                                command = cmd.name,
-                                status = CommandExecutionState.CONFIRMED.name,
-                                message = "✅ CONFIRMADA: Patrullaje reanudado con desvío seguro (ACK)",
-                                timestampEpochMs = respNow
-                            )
-                        }
-                        else -> CommandResponseDto(
-                            command = cmd.name,
-                            status = CommandExecutionState.REJECTED.name,
-                            message = "❌ RECHAZADA: El robot no se encuentra pausado ni en espera.",
+                            message = "✅ CONFIRMADA: Patrullaje reanudado con desvío seguro (ACK)",
                             timestampEpochMs = respNow
                         )
                     }
                 }
 
                 RobotCommandType.CANCEL_MISSION -> {
-                    val wp0 = RecsTrailWaypoints.byIndex(0)
+                    stateBeforePause = RobotOperationalState.PATROLLING
+                    _isPausedFromRthFlow.value = false
                     publishTelemetry(
                         s.copy(
                             operationalState = RobotOperationalState.IDLE,
                             missionProgressPercent = 0,
                             linearSpeedMps = 0.0f,
-                            posture = "Misión cancelada • Listo en ${RecsTrailWaypoints.byIndex(s.currentWaypointIndex).code}",
+                            posture = "Misión cancelada • Listo en ${currentWp.code}",
                             activeAlerts = emptyList(),
                             lastUpdatedEpochMs = respNow,
                             hriStatus = HriState(
@@ -441,39 +551,36 @@ class Go2SimulationEngine(
                 }
 
                 RobotCommandType.RETURN_TO_SAFE -> {
-                    if (s.operationalState == RobotOperationalState.IDLE && s.currentWaypointIndex == 0 && s.missionProgressPercent == 0) {
-                        CommandResponseDto(
-                            command = cmd.name,
-                            status = CommandExecutionState.REJECTED.name,
-                            message = "❌ RECHAZADA: El Go2 ya se encuentra en WP0 Punto Seguro.",
-                            timestampEpochMs = respNow
-                        )
-                    } else {
-                        val safeProgress = if (s.missionProgressPercent == 0) 16 else s.missionProgressPercent
-                        publishTelemetry(
-                            s.copy(
-                                operationalState = RobotOperationalState.RETURNING_SAFE,
-                                missionProgressPercent = safeProgress,
-                                linearSpeedMps = 1.8f,
-                                posture = "Evacuación RTH hacia WP0 Acceso Brasil",
-                                lastUpdatedEpochMs = respNow,
-                                hriStatus = HriState(
-                                    beaconMode = "Baliza Verde/Ámbar Retorno",
-                                    speakerAnnouncement = "Unidad retornando a Base Acceso Brasil",
-                                    isEmergencyAlarm = s.maxThermalTempC >= 70f
-                                )
+                    stateBeforePause = RobotOperationalState.PATROLLING
+                    _isPausedFromRthFlow.value = false
+                    val fallbackProgress = ((s.currentWaypointIndex * 100) / RecsTrailWaypoints.sectorSurWaypoints.size)
+                        .coerceAtLeast(16)
+                    val safeProgress = if (s.missionProgressPercent > 0) s.missionProgressPercent else fallbackProgress
+                    publishTelemetry(
+                        s.copy(
+                            operationalState = RobotOperationalState.RETURNING_SAFE,
+                            missionProgressPercent = safeProgress,
+                            linearSpeedMps = 1.8f,
+                            posture = "Evacuación RTH hacia WP0 Acceso Brasil",
+                            lastUpdatedEpochMs = respNow,
+                            hriStatus = HriState(
+                                beaconMode = "Baliza Verde/Ámbar Retorno",
+                                speakerAnnouncement = "Unidad retornando a Base Acceso Brasil",
+                                isEmergencyAlarm = RobotSafetyPolicy.hasThermalHazard(s)
                             )
                         )
-                        CommandResponseDto(
-                            command = cmd.name,
-                            status = CommandExecutionState.CONFIRMED.name,
-                            message = "✅ CONFIRMADA: Regreso a Punto Seguro (RTH -> WP0) en ejecución (ACK)",
-                            timestampEpochMs = respNow
-                        )
-                    }
+                    )
+                    CommandResponseDto(
+                        command = cmd.name,
+                        status = CommandExecutionState.CONFIRMED.name,
+                        message = "✅ CONFIRMADA: Regreso a Punto Seguro (RTH -> WP0) en ejecución (ACK)",
+                        timestampEpochMs = respNow
+                    )
                 }
 
                 RobotCommandType.OPERATIONAL_STOP -> {
+                    stateBeforePause = RobotOperationalState.PATROLLING
+                    _isPausedFromRthFlow.value = false
                     publishTelemetry(
                         s.copy(
                             operationalState = RobotOperationalState.STOPPED,
@@ -496,58 +603,78 @@ class Go2SimulationEngine(
                 }
 
                 RobotCommandType.ACK_ALERT -> {
-                    if (s.activeAlerts.isEmpty()) {
-                        CommandResponseDto(
-                            command = cmd.name,
-                            status = CommandExecutionState.REJECTED.name,
-                            message = "❌ RECHAZADA: No hay alertas activas pendientes de reconocimiento.",
-                            timestampEpochMs = respNow
-                        )
-                    } else {
-                        val updatedAlerts = s.activeAlerts.map { alert ->
-                            if (parsedRequest.alertIdToAck == null || alert.id == parsedRequest.alertIdToAck) {
-                                alert.copy(isAcknowledged = true)
-                            } else {
-                                alert
-                            }
+                    val updatedAlerts = s.activeAlerts.map { alert ->
+                        if (parsedRequest.alertIdToAck == null || alert.id == parsedRequest.alertIdToAck) {
+                            alert.copy(isAcknowledged = true)
+                        } else {
+                            alert
                         }
-                        val ackedTitle = updatedAlerts.firstOrNull()?.title ?: "Alerta"
-                        val wp = RecsTrailWaypoints.byIndex(s.currentWaypointIndex)
-                        publishTelemetry(
-                            s.copy(
-                                activeAlerts = updatedAlerts,
-                                lastUpdatedEpochMs = respNow
-                            )
-                        )
-                        eventsToEmit += SimulationDomainEvent.AlertAcknowledged(
-                            alertTitle = ackedTitle,
-                            waypointCode = wp.code,
-                            coordinates = formatCoords(s.latitude, s.longitude),
-                            epochMs = respNow
-                        )
-                        CommandResponseDto(
-                            command = cmd.name,
-                            status = CommandExecutionState.CONFIRMED.name,
-                            message = "✅ CONFIRMADA: Alerta reconocida (ACK) en ${wp.code}",
-                            timestampEpochMs = respNow
-                        )
                     }
+                    val targetAlert = updatedAlerts.firstOrNull {
+                        parsedRequest.alertIdToAck == null || it.id == parsedRequest.alertIdToAck
+                    } ?: updatedAlerts.firstOrNull()
+
+                    publishTelemetry(
+                        s.copy(
+                            activeAlerts = updatedAlerts,
+                            lastUpdatedEpochMs = respNow
+                        )
+                    )
+                    eventsToEmit += SimulationDomainEvent.AlertAcknowledged(
+                        alertTitle = targetAlert?.title ?: "Alerta",
+                        alertCategory = targetAlert?.category ?: AlertCategory.SYSTEM,
+                        waypointCode = currentWp.code,
+                        coordinates = formatCoords(s.latitude, s.longitude),
+                        epochMs = respNow
+                    )
+                    CommandResponseDto(
+                        command = cmd.name,
+                        status = CommandExecutionState.CONFIRMED.name,
+                        message = "✅ CONFIRMADA: Alerta reconocida (ACK) en ${currentWp.code}",
+                        timestampEpochMs = respNow
+                    )
                 }
             }
-        }.let { dto -> if (dto is CommandResponseDto) dto.toJsonString() else dto.toString() }
+        }
 
-        val finalReport = CommandResponseDto.fromJsonString(responseJson).toDomain()
-        _lastCommandStatusFlow.value = finalReport
-        eventsToEmit.forEach { _domainEventsFlow.emit(it) }
+        val finalReport = CommandResponseDto.fromJsonString(responseDto.toJsonString()).toDomain()
+        if (!staleGeneration) {
+            _lastCommandStatusFlow.value = finalReport
+            eventsToEmit.forEach { _domainEventsFlow.emit(it) }
+        }
         return finalReport
     }
 
-    suspend fun triggerScenario(scenario: SimulationScenario) {
-        val now = System.currentTimeMillis()
+    private suspend fun buildTimeoutReport(
+        cmd: RobotCommandType,
+        expectedGeneration: Long
+    ): CommandStatusReport {
+        val responseJson = CommandResponseDto(
+            command = cmd.name,
+            status = CommandExecutionState.NO_RESPONSE.name,
+            message = "⚠️ SIN RESPUESTA: Timeout de red 4G agotado tras ${timeoutMs / 1000}s",
+            timestampEpochMs = timeProvider.nowEpochMs()
+        ).toJsonString()
+        val parsed = CommandResponseDto.fromJsonString(responseJson).toDomain()
+
+        stateMutex.withLock {
+            if (scenarioGeneration == expectedGeneration) {
+                _lastCommandStatusFlow.value = parsed
+            }
+        }
+        return parsed
+    }
+
+    override suspend fun triggerScenario(scenario: SimulationScenario) {
+        val now = timeProvider.nowEpochMs()
         val emittedAlerts = mutableListOf<SimulationDomainEvent.AlertTriggered>()
 
         stateMutex.withLock {
+            scenarioGeneration++
+            stateBeforePause = RobotOperationalState.PATROLLING
+            _isPausedFromRthFlow.value = false
             _activeScenarioFlow.value = scenario
+
             when (scenario) {
                 SimulationScenario.SCENARIO_1_NORMAL -> {
                     _isForcedDisconnectedFlow.value = false
@@ -614,7 +741,7 @@ class Go2SimulationEngine(
                             operationalState = RobotOperationalState.PAUSED,
                             currentWaypointIndex = 2,
                             currentWaypointName = wp2.name,
-                            missionProgressPercent = 40,
+                            missionProgressPercent = 34,
                             latitude = wp2.latitude,
                             longitude = wp2.longitude,
                             linearSpeedMps = 0.0f,
@@ -626,7 +753,7 @@ class Go2SimulationEngine(
                             fireWeatherRisk = FireRiskLevel.MODERADO,
                             hriStatus = HriState(
                                 beaconMode = "Luz Ámbar Precaución",
-                                speakerAnnouncement = "Unidad con batería baja retornando a base",
+                                speakerAnnouncement = "Unidad en pausa preventiva por batería baja",
                                 isEmergencyAlarm = false
                             )
                         )
@@ -655,7 +782,7 @@ class Go2SimulationEngine(
                             operationalState = RobotOperationalState.PATROLLING,
                             currentWaypointIndex = 4,
                             currentWaypointName = wp4.name,
-                            missionProgressPercent = 76,
+                            missionProgressPercent = 68,
                             latitude = wp4.latitude,
                             longitude = wp4.longitude,
                             linearSpeedMps = 1.5f,
@@ -696,7 +823,7 @@ class Go2SimulationEngine(
                             operationalState = RobotOperationalState.ALERT_HOLD,
                             currentWaypointIndex = 5,
                             currentWaypointName = wp5.name,
-                            missionProgressPercent = 88,
+                            missionProgressPercent = 84,
                             latitude = wp5.latitude,
                             longitude = wp5.longitude,
                             linearSpeedMps = 0.0f,
@@ -747,7 +874,7 @@ class Go2SimulationEngine(
                             operationalState = RobotOperationalState.ALERT_HOLD,
                             currentWaypointIndex = 3,
                             currentWaypointName = wp3.name,
-                            missionProgressPercent = 60,
+                            missionProgressPercent = 50,
                             latitude = wp3.latitude,
                             longitude = wp3.longitude,
                             linearSpeedMps = 0.0f,
@@ -784,11 +911,11 @@ class Go2SimulationEngine(
         emittedAlerts.forEach { _domainEventsFlow.emit(it) }
     }
 
-    suspend fun toggleForcedDisconnection(disconnect: Boolean) {
+    override suspend fun toggleForcedDisconnection(disconnect: Boolean) {
         stateMutex.withLock {
             _isForcedDisconnectedFlow.value = disconnect
+            val now = timeProvider.nowEpochMs()
             if (!disconnect) {
-                val now = System.currentTimeMillis()
                 publishTelemetry(
                     currentState.copy(
                         connectivityStatus = ConnectivityStatus.ONLINE,
@@ -812,12 +939,17 @@ class Go2SimulationEngine(
         }
     }
 
-    fun setForceRejectNextCommand(forceReject: Boolean) {
+    override fun setForceRejectNextCommand(forceReject: Boolean) {
         _isForceRejectNextCommandFlow.value = forceReject
+    }
+
+    override fun close() {
+        scope.cancel()
     }
 
     private fun publishTelemetry(snapshot: TelemetrySnapshot) {
         currentState = snapshot
+        // Serialización y deserialización explícita mediante contratos JSON internos
         val json = TelemetryDto.fromDomain(snapshot).toJsonString()
         _telemetryJsonFlow.value = json
         _telemetryFlow.value = TelemetryDto.fromJsonString(json).toDomain()
@@ -850,13 +982,10 @@ class Go2SimulationEngine(
         private fun batteryToVoltage(percent: Int): Float =
             ((24.2f + (percent / 100f) * 5.6f) * 10f).roundToInt() / 10f
 
-        private fun formatTemp(temp: Float): String =
-            String.format(Locale.US, "%.1f", temp)
-
         private fun formatCoords(lat: Double, lon: Double): String =
             String.format(Locale.US, "%.4f, %.4f", lat, lon)
 
-        private fun initialSnapshot(): TelemetrySnapshot {
+        private fun initialSnapshot(nowEpochMs: Long): TelemetrySnapshot {
             val wp0 = RecsTrailWaypoints.byIndex(0)
             return TelemetrySnapshot(
                 connectivityStatus = ConnectivityStatus.ONLINE,
@@ -875,7 +1004,7 @@ class Go2SimulationEngine(
                 headingDeg = 22,
                 posture = "En espera en WP0 Base Acceso Brasil",
                 activeAlerts = emptyList(),
-                lastUpdatedEpochMs = System.currentTimeMillis(),
+                lastUpdatedEpochMs = nowEpochMs,
                 maxThermalTempC = 24.2f,
                 smokePpm = 12,
                 fireWeatherRisk = FireRiskLevel.MODERADO,

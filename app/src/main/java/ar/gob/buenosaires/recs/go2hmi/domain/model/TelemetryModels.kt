@@ -1,17 +1,33 @@
 package ar.gob.buenosaires.recs.go2hmi.domain.model
 
+/**
+ * Estado del enlace de telemetría 4G LTE entre el robot y la consola del guardaparques.
+ *
+ * - [ONLINE]: paquetes recibidos dentro de la ventana de vigencia (< 5 s).
+ * - [STALE_DATA]: la última trama superó el umbral de frescura (>= 5 s) sin confirmación de corte.
+ * - [DISCONNECTED]: pérdida explícita de enlace 4G (ej. cañadón WP4 o corte manual en simulador).
+ */
 enum class ConnectivityStatus {
     ONLINE,
     STALE_DATA,
     DISCONNECTED
 }
 
+/**
+ * Máquina de estados operativos del cuadrúpedo Unitree Go2 EDU.
+ */
 enum class RobotOperationalState {
+    /** En espera en base o waypoint tras finalizar/cancelar misión. */
     IDLE,
+    /** Recorriendo autónomamente el circuito WP0 -> WP5. */
     PATROLLING,
+    /** Detenido temporalmente por orden del operador o prevención de batería baja. */
     PAUSED,
+    /** Freno autónomo por detección de obstáculo LiDAR 4D o foco ígneo (exige ACK/decisión). */
     ALERT_HOLD,
+    /** Evacuación autónoma en reversa/retorno hacia WP0 Base Acceso Brasil (RTH). */
     RETURNING_SAFE,
+    /** Detención operativa por software solicitada desde la app (no reemplaza E-Stop físico). */
     STOPPED
 }
 
@@ -28,6 +44,9 @@ enum class AlertCategory {
     SYSTEM
 }
 
+/**
+ * Índice meteorológico de peligro de incendio en la Reserva Ecológica Costanera Sur.
+ */
 enum class FireRiskLevel(val label: String) {
     BAJO("BAJO"),
     MODERADO("MODERADO"),
@@ -35,6 +54,9 @@ enum class FireRiskLevel(val label: String) {
     EXTREMO("EXTREMO")
 }
 
+/**
+ * Alerta emitida por los sensores embarcados o por el supervisor de autonomía del robot.
+ */
 data class RobotAlert(
     val id: String,
     val severity: AlertSeverity,
@@ -46,12 +68,20 @@ data class RobotAlert(
     val timestampEpochMs: Long
 )
 
+/**
+ * Estado de la Interacción Humano-Robot (HRI) con visitantes presentes en el sendero.
+ * Modela la señalización luminosa (baliza) y acústica (altavoz/sirena) para evitar
+ * incidentes con peatones y ciclistas dentro de la Reserva.
+ */
 data class HriState(
     val beaconMode: String,
     val speakerAnnouncement: String,
     val isEmergencyAlarm: Boolean
 )
 
+/**
+ * Punto de referencia georreferenciado del circuito de patrullaje.
+ */
 data class WaypointNode(
     val index: Int,
     val code: String,
@@ -62,7 +92,11 @@ data class WaypointNode(
 )
 
 /**
- * Snapshot inmutable con las 11 variables de telemetría requeridas + estado HRI.
+ * Snapshot inmutable con las variables de telemetría requeridas por la consigna + estado HRI.
+ *
+ * Incluye las 8 métricas base (conectividad, energía, estado, misión/progreso, GPS, cinemática,
+ * alertas y timestamp) más las 3 variables específicas del servicio de prevención ígnea en RECS
+ * (temperatura máxima IR, concentración de humo/CO e índice meteorológico de fuego).
  */
 data class TelemetrySnapshot(
     // 1) Conectividad
@@ -103,6 +137,9 @@ data class TelemetrySnapshot(
     val hriStatus: HriState
 )
 
+/**
+ * Catálogo estático de los 6 waypoints del circuito cerrado "Laguna de los Coipos" (3.8 km).
+ */
 object RecsTrailWaypoints {
     val sectorSurWaypoints: List<WaypointNode> = listOf(
         WaypointNode(0, "WP0", "Base Acceso Brasil / Punto Seguro", "WP0 Base", -34.6152, -58.3568),

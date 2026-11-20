@@ -3,15 +3,21 @@ package ar.gob.buenosaires.recs.go2hmi.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import ar.gob.buenosaires.recs.go2hmi.domain.model.AlertSeverity
 import ar.gob.buenosaires.recs.go2hmi.domain.model.CommandExecutionState
 import ar.gob.buenosaires.recs.go2hmi.domain.model.CommandStatusReport
+import ar.gob.buenosaires.recs.go2hmi.domain.model.ConnectivityStatus
 import ar.gob.buenosaires.recs.go2hmi.domain.model.HistoryEventItem
 import ar.gob.buenosaires.recs.go2hmi.domain.model.RobotAlert
 import ar.gob.buenosaires.recs.go2hmi.domain.model.RobotCommandType
-import ar.gob.buenosaires.recs.go2hmi.domain.model.RobotOperationalState
 import ar.gob.buenosaires.recs.go2hmi.domain.model.SimulationScenario
 import ar.gob.buenosaires.recs.go2hmi.domain.model.TelemetrySnapshot
+import ar.gob.buenosaires.recs.go2hmi.domain.policy.CommandPermissions
+import ar.gob.buenosaires.recs.go2hmi.domain.policy.RobotSafetyPolicy
 import ar.gob.buenosaires.recs.go2hmi.domain.repository.Go2RobotRepository
+import ar.gob.buenosaires.recs.go2hmi.domain.repository.RobotSimulationController
+import ar.gob.buenosaires.recs.go2hmi.domain.util.SystemTimeProvider
+import ar.gob.buenosaires.recs.go2hmi.domain.util.TimeProvider
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -21,17 +27,9 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-data class CommandPermissions(
-    val canStartMission: Boolean = false,
-    val canPauseMission: Boolean = false,
-    val canResumeMission: Boolean = false,
-    val canCancelMission: Boolean = false,
-    val canReturnToSafe: Boolean = false,
-    val canOperationalStop: Boolean = true,
-    val canAckAlert: Boolean = false,
-    val highlightRth: Boolean = false
-)
-
+/**
+ * Estado único e inmutable que observa la interfaz Compose.
+ */
 data class HmiUiState(
     val telemetry: TelemetrySnapshot,
     val lastCommandStatus: CommandStatusReport,
@@ -46,11 +44,44 @@ data class HmiUiState(
     val criticalModalAlert: RobotAlert? = null
 )
 
+/**
+ * ViewModel principal de operación y supervisión del guardaparques.
+ *
+ * Responsabilidades:
+ * - Combinar flujos de solo lectura de [Go2RobotRepository] y [RobotSimulationController]
+ *   en un único [uiState] expuesto como `StateFlow<HmiUiState>`.
+ * - Calcular si la telemetría quedó desactualizada (>= 5 s) y qué botones habilitar
+ *   usando las reglas compartidas de [RobotSafetyPolicy].
+ * - Manejar los diálogos de confirmación para acciones críticas (`CANCEL_MISSION` y
+ *   `OPERATIONAL_STOP`) y las alertas críticas sin meter lógica de negocio en Compose.
+ */
 class OperatorViewModel(
-    private val repository: Go2RobotRepository
+    private val repository: Go2RobotRepository,
+    private val simulationController: RobotSimulationController,
+    private val timeProvider: TimeProvider = SystemTimeProvider
 ) : ViewModel() {
 
-    private val currentTimeMillisFlow = MutableStateFlow(System.currentTimeMillis())
+    private data class RobotCoreSnapshot(
+        val telemetry: TelemetrySnapshot,
+        val cmdStatus: CommandStatusReport,
+        val history: List<HistoryEventItem>,
+        val isPausedFromRth: Boolean
+    )
+
+    private data class SimulationFlags(
+        val scenario: SimulationScenario,
+        val forcedDisconnected: Boolean,
+        val forceRejectNextCommand: Boolean
+    )
+
+    private data class UiTransientState(
+        val nowEpochMs: Long,
+        val pendingConfirmation: RobotCommandType?,
+        val dismissedModalAlertId: String?
+    )
+
+    // Flujos internos estrictamente privados; la UI solo observa uiState (read-only StateFlow)
+    private val currentTimeMillisFlow = MutableStateFlow(timeProvider.nowEpochMs())
     private val pendingConfirmationFlow = MutableStateFlow<RobotCommandType?>(null)
     private val dismissedModalAlertIdFlow = MutableStateFlow<String?>(null)
 
@@ -58,55 +89,93 @@ class OperatorViewModel(
         viewModelScope.launch {
             while (isActive) {
                 delay(1000L)
-                currentTimeMillisFlow.value = System.currentTimeMillis()
+                currentTimeMillisFlow.value = timeProvider.nowEpochMs()
             }
         }
     }
 
-    val uiState: StateFlow<HmiUiState> = combine(
+    private val robotCoreFlow = combine(
         repository.telemetryFlow,
         repository.lastCommandStatusFlow,
         repository.historyEventsFlow,
-        repository.activeScenarioFlow,
-        repository.isForcedDisconnectedFlow,
-        repository.isForceRejectNextCommandFlow,
+        repository.isPausedFromRthFlow
+    ) { telemetry, cmdStatus, history, pausedFromRth ->
+        RobotCoreSnapshot(
+            telemetry = telemetry,
+            cmdStatus = cmdStatus,
+            history = history,
+            isPausedFromRth = pausedFromRth
+        )
+    }
+
+    private val simulationFlagsFlow = combine(
+        simulationController.activeScenarioFlow,
+        simulationController.isForcedDisconnectedFlow,
+        simulationController.isForceRejectNextCommandFlow
+    ) { scenario, forcedDisconnected, forceRejectNextCommand ->
+        SimulationFlags(
+            scenario = scenario,
+            forcedDisconnected = forcedDisconnected,
+            forceRejectNextCommand = forceRejectNextCommand
+        )
+    }
+
+    private val uiTransientFlow = combine(
         currentTimeMillisFlow,
         pendingConfirmationFlow,
         dismissedModalAlertIdFlow
-    ) { values ->
-        @Suppress("UNCHECKED_CAST")
-        val telemetry = values[0] as TelemetrySnapshot
-        val cmdStatus = values[1] as CommandStatusReport
-        @Suppress("UNCHECKED_CAST")
-        val history = values[2] as List<HistoryEventItem>
-        val scenario = values[3] as SimulationScenario
-        val forcedDisc = values[4] as Boolean
-        val forceReject = values[5] as Boolean
-        val nowMs = values[6] as Long
-        val pendingConfirm = values[7] as RobotCommandType?
-        val dismissedAlertId = values[8] as String?
+    ) { nowEpochMs, pendingConfirmation, dismissedModalAlertId ->
+        UiTransientState(
+            nowEpochMs = nowEpochMs,
+            pendingConfirmation = pendingConfirmation,
+            dismissedModalAlertId = dismissedModalAlertId
+        )
+    }
 
-        val elapsedSec = ((nowMs - telemetry.lastUpdatedEpochMs) / 1000L).coerceAtLeast(0L)
-        val stale = forcedDisc || elapsedSec >= 5L
-        val permissions = computePermissions(telemetry, cmdStatus)
+    /**
+     * Único flujo público de estado observado por Compose mediante `collectAsStateWithLifecycle()`.
+     */
+    val uiState: StateFlow<HmiUiState> = combine(
+        robotCoreFlow,
+        simulationFlagsFlow,
+        uiTransientFlow
+    ) { core, simFlags, transient ->
+        val elapsedSec = ((transient.nowEpochMs - core.telemetry.lastUpdatedEpochMs) / 1000L)
+            .coerceAtLeast(0L)
+        val stale = simFlags.forcedDisconnected ||
+            elapsedSec >= RobotSafetyPolicy.STALE_TELEMETRY_THRESHOLD_SEC
 
-        val criticalAlert = telemetry.activeAlerts.firstOrNull { alert ->
-            !alert.isAcknowledged && alert.id != dismissedAlertId &&
-                (telemetry.maxThermalTempC >= 70f ||
-                    alert.severity == ar.gob.buenosaires.recs.go2hmi.domain.model.AlertSeverity.CRITICAL)
+        // Si superó el umbral de frescura sin desconexión explícita, reflejar STALE_DATA en el estado
+        val effectiveTelemetry = if (stale && core.telemetry.connectivityStatus == ConnectivityStatus.ONLINE) {
+            core.telemetry.copy(connectivityStatus = ConnectivityStatus.STALE_DATA)
+        } else {
+            core.telemetry
+        }
+
+        val permissions = RobotSafetyPolicy.evaluatePermissions(
+            telemetry = effectiveTelemetry,
+            isCommandPending = core.cmdStatus.state == CommandExecutionState.PENDING,
+            isResumingRth = core.isPausedFromRth
+        )
+
+        val criticalAlert = effectiveTelemetry.activeAlerts.firstOrNull { alert ->
+            !alert.isAcknowledged &&
+                alert.id != transient.dismissedModalAlertId &&
+                (RobotSafetyPolicy.hasThermalHazard(effectiveTelemetry) ||
+                    alert.severity == AlertSeverity.CRITICAL)
         }
 
         HmiUiState(
-            telemetry = telemetry,
-            lastCommandStatus = cmdStatus,
-            historyEvents = history,
-            activeScenario = scenario,
-            isForcedDisconnected = forcedDisc,
-            isForceRejectNextCommand = forceReject,
+            telemetry = effectiveTelemetry,
+            lastCommandStatus = core.cmdStatus,
+            historyEvents = core.history,
+            activeScenario = simFlags.scenario,
+            isForcedDisconnected = simFlags.forcedDisconnected,
+            isForceRejectNextCommand = simFlags.forceRejectNextCommand,
             secondsSinceLastUpdate = elapsedSec,
             isDataStale = stale,
             commandPermissions = permissions,
-            pendingConfirmationCommand = pendingConfirm,
+            pendingConfirmationCommand = transient.pendingConfirmation,
             criticalModalAlert = criticalAlert
         )
     }.stateIn(
@@ -114,11 +183,17 @@ class OperatorViewModel(
         started = SharingStarted.WhileSubscribed(5000L),
         initialValue = HmiUiState(
             telemetry = repository.telemetryFlow.value,
-            lastCommandStatus = repository.lastCommandStatusFlow.value
+            lastCommandStatus = repository.lastCommandStatusFlow.value,
+            commandPermissions = RobotSafetyPolicy.evaluatePermissions(
+                telemetry = repository.telemetryFlow.value,
+                isCommandPending = false,
+                isResumingRth = repository.isPausedFromRthFlow.value
+            )
         )
     )
 
     fun onCommandRequested(command: RobotCommandType, alertIdToAck: String? = null) {
+        // Pedimos confirmación previa para evitar cancelar o detener el robot por accidente
         if (command == RobotCommandType.CANCEL_MISSION || command == RobotCommandType.OPERATIONAL_STOP) {
             pendingConfirmationFlow.value = command
             return
@@ -143,21 +218,21 @@ class OperatorViewModel(
     fun triggerScenario(scenario: SimulationScenario) {
         dismissedModalAlertIdFlow.value = null
         viewModelScope.launch {
-            repository.triggerScenario(scenario)
-            currentTimeMillisFlow.value = System.currentTimeMillis()
+            simulationController.triggerScenario(scenario)
+            currentTimeMillisFlow.value = timeProvider.nowEpochMs()
         }
     }
 
     fun toggleForcedDisconnection(disconnect: Boolean) {
         viewModelScope.launch {
-            repository.toggleForcedDisconnection(disconnect)
-            currentTimeMillisFlow.value = System.currentTimeMillis()
+            simulationController.toggleForcedDisconnection(disconnect)
+            currentTimeMillisFlow.value = timeProvider.nowEpochMs()
         }
     }
 
     fun toggleForceRejectNextCommand(forceReject: Boolean) {
         viewModelScope.launch {
-            repository.toggleForceRejectNextCommand(forceReject)
+            simulationController.toggleForceRejectNextCommand(forceReject)
         }
     }
 
@@ -173,46 +248,19 @@ class OperatorViewModel(
         }
     }
 
-    private fun computePermissions(
-        telemetry: TelemetrySnapshot,
-        cmdStatus: CommandStatusReport
-    ): CommandPermissions {
-        val isPending = cmdStatus.state == CommandExecutionState.PENDING
-        val state = telemetry.operationalState
-        val isAtBase = state == RobotOperationalState.IDLE &&
-            telemetry.currentWaypointIndex == 0 &&
-            telemetry.missionProgressPercent == 0
-        val hasFireHazard = telemetry.maxThermalTempC >= 70f
-        val hasActiveAlerts = telemetry.activeAlerts.isNotEmpty()
-        val hasUnackedAlert = telemetry.activeAlerts.any { !it.isAcknowledged }
-
-        return CommandPermissions(
-            canStartMission = !isPending &&
-                (state == RobotOperationalState.IDLE || state == RobotOperationalState.STOPPED) &&
-                telemetry.batteryPercent > 20 &&
-                !hasFireHazard,
-            canPauseMission = !isPending &&
-                (state == RobotOperationalState.PATROLLING || state == RobotOperationalState.RETURNING_SAFE),
-            // En Escenario 5 permitimos click en "Reanudar Misión" cuando hay fuego o pausa para demostrar el rechazo de seguridad
-            // O si se pide deshabilitar en IDLE; en ALERT_HOLD térmico se habilita click para mostrar el chip RECHAZADA como exige Flujo 2,
-            // mientras que en IDLE o PATROLLING está deshabilitado por precondición lógica.
-            canResumeMission = !isPending &&
-                (state == RobotOperationalState.PAUSED || state == RobotOperationalState.ALERT_HOLD),
-            canCancelMission = !isPending && !isAtBase,
-            canReturnToSafe = !isPending && !isAtBase,
-            canOperationalStop = !isPending && state != RobotOperationalState.STOPPED,
-            canAckAlert = !isPending && hasActiveAlerts && hasUnackedAlert,
-            highlightRth = telemetry.batteryPercent <= 25 || hasFireHazard || state == RobotOperationalState.ALERT_HOLD
-        )
-    }
-
     class Factory(
-        private val repository: Go2RobotRepository
+        private val repository: Go2RobotRepository,
+        private val simulationController: RobotSimulationController,
+        private val timeProvider: TimeProvider = SystemTimeProvider
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             if (modelClass.isAssignableFrom(OperatorViewModel::class.java)) {
-                return OperatorViewModel(repository) as T
+                return OperatorViewModel(
+                    repository = repository,
+                    simulationController = simulationController,
+                    timeProvider = timeProvider
+                ) as T
             }
             throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
         }

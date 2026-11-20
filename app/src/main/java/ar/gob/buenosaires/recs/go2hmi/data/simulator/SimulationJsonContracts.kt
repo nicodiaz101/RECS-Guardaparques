@@ -24,6 +24,15 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 
+/**
+ * Contratos JSON propuestos para la comunicación HMI <-> Unidad Go2 simulada.
+ *
+ * IMPORTANTE (consigna académica): este esquema representa un contrato propio de
+ * aplicación diseñado para el TP y NO debe presentarse como protocolo oficial de Unitree.
+ * El simulador serializa y deserializa cada paquete de telemetría y comando mediante
+ * estos DTOs (`toJsonString()` / `fromJsonString()`) para validar el ciclo completo
+ * de mensajería desacoplado de los modelos de dominio.
+ */
 data class AlertDto(
     val id: String,
     val severity: String,

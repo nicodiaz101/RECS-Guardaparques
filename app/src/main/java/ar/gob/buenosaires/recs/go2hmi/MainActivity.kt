@@ -27,15 +27,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import ar.gob.buenosaires.recs.go2hmi.data.local.room.AppDatabase
-import ar.gob.buenosaires.recs.go2hmi.data.repository.Go2RobotRepositoryImpl
-import ar.gob.buenosaires.recs.go2hmi.data.simulator.Go2SimulationEngine
 import ar.gob.buenosaires.recs.go2hmi.ui.screens.HistoryLogScreen
 import ar.gob.buenosaires.recs.go2hmi.ui.screens.MainSupervisionScreen
 import ar.gob.buenosaires.recs.go2hmi.ui.screens.RobotSelectionScreen
 import ar.gob.buenosaires.recs.go2hmi.ui.theme.Go2HmiTheme
 import ar.gob.buenosaires.recs.go2hmi.ui.viewmodel.OperatorViewModel
 
+/**
+ * Destinos principales de la barra de navegación inferior (M3 NavigationBar).
+ */
 private enum class AppDestination(
     val label: String,
     val icon: ImageVector
@@ -45,23 +45,28 @@ private enum class AppDestination(
     HISTORY("Historial Local", Icons.Rounded.History)
 }
 
+/**
+ * Activity principal de la app con Jetpack Compose.
+ *
+ * Obtiene el [OperatorViewModel] inyectándole las dependencias desde [RecsGo2Application]
+ * sin que la pantalla conozca el simulador ni la base de datos Room.
+ */
 class MainActivity : ComponentActivity() {
 
     private val viewModel: OperatorViewModel by viewModels {
-        val db = AppDatabase.getInstance(applicationContext)
-        val engine = Go2SimulationEngine()
-        val repository = Go2RobotRepositoryImpl(
-            engine = engine,
-            historyDao = db.historyEventDao()
+        val container = (application as RecsGo2Application).container
+        OperatorViewModel.Factory(
+            repository = container.robotRepository,
+            simulationController = container.simulationController,
+            timeProvider = container.timeProvider
         )
-        OperatorViewModel.Factory(repository)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            // Prohibición de Dynamic Color (dynamicColor = false estricto)
+            // Prohibición de Dynamic Color (dynamicColor = false estricto para visibilidad táctica)
             Go2HmiTheme(dynamicColor = false) {
                 RecsGo2HmiApp(viewModel = viewModel)
             }
@@ -69,6 +74,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * Raíz Compose de la aplicación.
+ *
+ * Observa `viewModel.uiState` respetando el ciclo de vida (`collectAsStateWithLifecycle`)
+ * y pasa únicamente datos inmutables y callbacks de eventos hacia las pantallas hijas.
+ */
 @Composable
 private fun RecsGo2HmiApp(viewModel: OperatorViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -118,6 +129,7 @@ private fun RecsGo2HmiApp(viewModel: OperatorViewModel) {
             when (currentDestination) {
                 AppDestination.UNITS -> RobotSelectionScreen(
                     telemetry = uiState.telemetry,
+                    isDataStale = uiState.isDataStale,
                     onOpenConsole = { currentDestination = AppDestination.SUPERVISION }
                 )
 

@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.sp
 import ar.gob.buenosaires.recs.go2hmi.domain.model.RecsTrailWaypoints
 import ar.gob.buenosaires.recs.go2hmi.domain.model.RobotOperationalState
 import ar.gob.buenosaires.recs.go2hmi.domain.model.TelemetrySnapshot
+import ar.gob.buenosaires.recs.go2hmi.domain.policy.RobotSafetyPolicy
 import ar.gob.buenosaires.recs.go2hmi.ui.theme.LocalHmiSemanticColors
 import ar.gob.buenosaires.recs.go2hmi.ui.theme.MapLandBackground
 import ar.gob.buenosaires.recs.go2hmi.ui.theme.MapRiverFill
@@ -49,6 +50,13 @@ import ar.gob.buenosaires.recs.go2hmi.ui.theme.MapWaterFill
 import ar.gob.buenosaires.recs.go2hmi.ui.theme.TelemetryTextStyles
 import java.util.Locale
 
+/**
+ * Mapa táctico vectorial en Compose `Canvas` del circuito Laguna de los Coipos (3.8 km, WP0–WP5).
+ *
+ * Representa de forma esquemática el espejo de agua, el Río de la Plata al Este, el trazo
+ * recorrido, el halo de foco térmico cuando la IR supera [RobotSafetyPolicy.THERMAL_LOCKOUT_TEMP_C]
+ * y el indicador visual de datos antiguos ("CONGELADO") ante desconexión.
+ */
 @Composable
 fun TacticalMapCard(
     telemetry: TelemetrySnapshot,
@@ -59,7 +67,7 @@ fun TacticalMapCard(
     val semantic = LocalHmiSemanticColors.current
     val primaryColor = MaterialTheme.colorScheme.primary
     val onSurfaceVariantColor = MaterialTheme.colorScheme.onSurfaceVariant
-    val hasFire = telemetry.maxThermalTempC >= 70.0f
+    val hasFire = telemetry.maxThermalTempC >= RobotSafetyPolicy.THERMAL_LOCKOUT_TEMP_C
     val textMeasurer = rememberTextMeasurer()
 
     val borderColor = when {

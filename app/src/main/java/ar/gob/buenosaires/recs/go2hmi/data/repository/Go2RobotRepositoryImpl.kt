@@ -2,7 +2,7 @@ package ar.gob.buenosaires.recs.go2hmi.data.repository
 
 import ar.gob.buenosaires.recs.go2hmi.data.local.room.HistoryEventDao
 import ar.gob.buenosaires.recs.go2hmi.data.local.room.HistoryEventEntity
-import ar.gob.buenosaires.recs.go2hmi.data.simulator.Go2SimulationEngine
+import ar.gob.buenosaires.recs.go2hmi.data.simulator.RobotTelemetryDataSource
 import ar.gob.buenosaires.recs.go2hmi.data.simulator.SimulationDomainEvent
 import ar.gob.buenosaires.recs.go2hmi.domain.model.AlertCategory
 import ar.gob.buenosaires.recs.go2hmi.domain.model.AlertSeverity
@@ -15,27 +15,46 @@ import ar.gob.buenosaires.recs.go2hmi.domain.model.RobotCommandType
 import ar.gob.buenosaires.recs.go2hmi.domain.model.SimulationScenario
 import ar.gob.buenosaires.recs.go2hmi.domain.model.TelemetrySnapshot
 import ar.gob.buenosaires.recs.go2hmi.domain.repository.Go2RobotRepository
+import ar.gob.buenosaires.recs.go2hmi.domain.repository.RobotSimulationController
+import ar.gob.buenosaires.recs.go2hmi.domain.util.SystemTimeProvider
+import ar.gob.buenosaires.recs.go2hmi.domain.util.TimeProvider
+import java.io.Closeable
 import java.util.Locale
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
+/**
+ * Implementación única del repositorio del robot y del controlador de simulación.
+ *
+ * Coordina la fuente de telemetría ([RobotTelemetryDataSource]) con la persistencia local
+ * en Room ([HistoryEventDao]). Al depender de la interfaz [RobotTelemetryDataSource] en
+ * lugar de una clase concreta y separar [Go2RobotRepository] de [RobotSimulationController],
+ * la capa de dominio y UI quedan completamente aisladas del motor simulado.
+ */
 class Go2RobotRepositoryImpl(
-    private val engine: Go2SimulationEngine,
-    private val historyDao: HistoryEventDao
-) : Go2RobotRepository {
+    private val dataSource: RobotTelemetryDataSource,
+    private val historyDao: HistoryEventDao,
+    ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val timeProvider: TimeProvider = SystemTimeProvider
+) : Go2RobotRepository, RobotSimulationController, Closeable {
 
-    private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val repoScope = CoroutineScope(SupervisorJob() + ioDispatcher)
 
-    override val telemetryFlow: StateFlow<TelemetrySnapshot> = engine.telemetryFlow
-    override val lastCommandStatusFlow: StateFlow<CommandStatusReport> = engine.lastCommandStatusFlow
-    override val isForcedDisconnectedFlow: StateFlow<Boolean> = engine.isForcedDisconnectedFlow
-    override val isForceRejectNextCommandFlow: StateFlow<Boolean> = engine.isForceRejectNextCommandFlow
-    override val activeScenarioFlow: StateFlow<SimulationScenario> = engine.activeScenarioFlow
+    override val telemetryFlow: StateFlow<TelemetrySnapshot> = dataSource.telemetryFlow
+    override val lastCommandStatusFlow: StateFlow<CommandStatusReport> = dataSource.lastCommandStatusFlow
+    override val isPausedFromRthFlow: StateFlow<Boolean> = dataSource.isPausedFromRthFlow
+
+    override val isForcedDisconnectedFlow: StateFlow<Boolean> = dataSource.isForcedDisconnectedFlow
+    override val isForceRejectNextCommandFlow: StateFlow<Boolean> = dataSource.isForceRejectNextCommandFlow
+    override val activeScenarioFlow: StateFlow<SimulationScenario> = dataSource.activeScenarioFlow
 
     override val historyEventsFlow: Flow<List<HistoryEventItem>> =
         historyDao.observeAll().map { entities -> entities.map { it.toDomain() } }
@@ -45,49 +64,53 @@ class Go2RobotRepositoryImpl(
             seedInitialHistoryIfEmpty()
         }
         repoScope.launch {
-            engine.domainEventsFlow.collect { event ->
+            dataSource.domainEventsFlow.collect { event ->
                 persistDomainEvent(event)
             }
         }
     }
 
     override suspend fun sendCommand(command: RobotCommandType, alertIdToAck: String?) {
-        val result = engine.processCommand(command = command, alertIdToAck = alertIdToAck)
-        val snap = engine.telemetryFlow.value
-        val wp = RecsTrailWaypoints.byIndex(snap.currentWaypointIndex)
-        val coords = String.format(Locale.US, "%.4f, %.4f", snap.latitude, snap.longitude)
+        // Ejecutamos el envío y su registro en Room sobre repoScope para garantizar
+        // que la orden y su auditoría local completen aunque el ViewModel sea destruido.
+        repoScope.async {
+            val result = dataSource.processCommand(command = command, alertIdToAck = alertIdToAck)
+            val snap = dataSource.telemetryFlow.value
+            val wp = RecsTrailWaypoints.byIndex(snap.currentWaypointIndex)
+            val coords = String.format(Locale.US, "%.4f, %.4f", snap.latitude, snap.longitude)
 
-        val severity = when (result.state) {
-            CommandExecutionState.CONFIRMED -> AlertSeverity.INFO
-            CommandExecutionState.REJECTED -> AlertSeverity.CRITICAL
-            CommandExecutionState.NO_RESPONSE -> AlertSeverity.WARNING
-            else -> AlertSeverity.INFO
-        }
+            val severity = when (result.state) {
+                CommandExecutionState.CONFIRMED -> AlertSeverity.INFO
+                CommandExecutionState.REJECTED -> AlertSeverity.CRITICAL
+                CommandExecutionState.NO_RESPONSE -> AlertSeverity.WARNING
+                else -> AlertSeverity.INFO
+            }
 
-        historyDao.insert(
-            HistoryEventEntity(
-                timestampEpochMs = result.timestampEpochMs,
-                category = HistoryEventCategory.COMMAND.name,
-                severity = severity.name,
-                title = "Comando ${command.name} -> ${result.state.name}",
-                details = result.message,
-                waypointCode = wp.code,
-                coordinates = coords
+            historyDao.insertAndPrune(
+                HistoryEventEntity(
+                    timestampEpochMs = result.timestampEpochMs,
+                    category = HistoryEventCategory.COMMAND.name,
+                    severity = severity.name,
+                    title = "Comando ${command.name} -> ${result.state.name}",
+                    details = result.message,
+                    waypointCode = wp.code,
+                    coordinates = coords
+                )
             )
-        )
+        }.await()
     }
 
     override suspend fun triggerScenario(scenario: SimulationScenario) {
-        engine.triggerScenario(scenario)
+        dataSource.triggerScenario(scenario)
     }
 
     override suspend fun toggleForcedDisconnection(disconnect: Boolean) {
-        engine.toggleForcedDisconnection(disconnect)
-        val snap = engine.telemetryFlow.value
+        dataSource.toggleForcedDisconnection(disconnect)
+        val snap = dataSource.telemetryFlow.value
         val wp = RecsTrailWaypoints.byIndex(snap.currentWaypointIndex)
-        historyDao.insert(
+        historyDao.insertAndPrune(
             HistoryEventEntity(
-                timestampEpochMs = System.currentTimeMillis(),
+                timestampEpochMs = timeProvider.nowEpochMs(),
                 category = HistoryEventCategory.INCIDENT.name,
                 severity = if (disconnect) AlertSeverity.WARNING.name else AlertSeverity.INFO.name,
                 title = if (disconnect) "Enlace 4G interrumpido (Simulación)" else "Enlace 4G LTE restablecido",
@@ -103,11 +126,16 @@ class Go2RobotRepositoryImpl(
     }
 
     override suspend fun toggleForceRejectNextCommand(forceReject: Boolean) {
-        engine.setForceRejectNextCommand(forceReject)
+        dataSource.setForceRejectNextCommand(forceReject)
     }
 
     override suspend fun clearHistory() {
         historyDao.deleteAll()
+    }
+
+    override fun close() {
+        repoScope.cancel()
+        dataSource.close()
     }
 
     private suspend fun persistDomainEvent(event: SimulationDomainEvent) {
@@ -131,10 +159,7 @@ class Go2RobotRepositoryImpl(
                 coordinates = event.coordinates
             )
             is SimulationDomainEvent.AlertTriggered -> {
-                val category = when (event.alert.category) {
-                    AlertCategory.FIRE -> HistoryEventCategory.FIRE_ALERT
-                    else -> HistoryEventCategory.INCIDENT
-                }
+                val category = mapAlertCategoryToHistory(event.alert.category)
                 HistoryEventEntity(
                     timestampEpochMs = event.alert.timestampEpochMs,
                     category = category.name,
@@ -145,23 +170,33 @@ class Go2RobotRepositoryImpl(
                     coordinates = event.coordinates
                 )
             }
-            is SimulationDomainEvent.AlertAcknowledged -> HistoryEventEntity(
-                timestampEpochMs = event.epochMs,
-                category = HistoryEventCategory.FIRE_ALERT.name,
-                severity = AlertSeverity.INFO.name,
-                title = "${event.alertTitle} — Reconocida (ACK)",
-                details = "Guardaparques confirmó recepción y evaluación de alerta en ${event.waypointCode}.",
-                waypointCode = event.waypointCode,
-                coordinates = event.coordinates
-            )
+            is SimulationDomainEvent.AlertAcknowledged -> {
+                val category = mapAlertCategoryToHistory(event.alertCategory)
+                HistoryEventEntity(
+                    timestampEpochMs = event.epochMs,
+                    category = category.name,
+                    severity = AlertSeverity.INFO.name,
+                    title = "${event.alertTitle} — Reconocida (ACK)",
+                    details = "Guardaparques confirmó recepción y evaluación de alerta en ${event.waypointCode}.",
+                    waypointCode = event.waypointCode,
+                    coordinates = event.coordinates
+                )
+            }
         }
-        historyDao.insert(entity)
+        historyDao.insertAndPrune(entity)
     }
 
+    private fun mapAlertCategoryToHistory(category: AlertCategory): HistoryEventCategory =
+        when (category) {
+            AlertCategory.FIRE -> HistoryEventCategory.FIRE_ALERT
+            AlertCategory.OBSTACLE,
+            AlertCategory.BATTERY,
+            AlertCategory.SYSTEM -> HistoryEventCategory.INCIDENT
+        }
+
     private suspend fun seedInitialHistoryIfEmpty() {
-        if (historyDao.count() > 0) return
-        val now = System.currentTimeMillis()
-        historyDao.insertAll(
+        val now = timeProvider.nowEpochMs()
+        historyDao.seedIfEmpty(
             listOf(
                 HistoryEventEntity(
                     timestampEpochMs = now - 3_600_000L,

@@ -21,6 +21,7 @@ import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.SmartToy
 import androidx.compose.material.icons.rounded.Wifi
+import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
@@ -40,14 +41,25 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import ar.gob.buenosaires.recs.go2hmi.domain.model.ConnectivityStatus
+import ar.gob.buenosaires.recs.go2hmi.domain.model.RobotOperationalState
 import ar.gob.buenosaires.recs.go2hmi.domain.model.TelemetrySnapshot
+import ar.gob.buenosaires.recs.go2hmi.domain.policy.RobotSafetyPolicy
 import ar.gob.buenosaires.recs.go2hmi.ui.theme.LocalHmiSemanticColors
 import ar.gob.buenosaires.recs.go2hmi.ui.theme.TelemetryTextStyles
 
+/**
+ * Pantalla 1: Selección de Unidades Cuadrúpedas asignadas a la RECS.
+ *
+ * Muestra la unidad activa (`GO2-RECS-01`) reflejando su estado real de enlace,
+ * batería y waypoint actual, junto a una segunda unidad de reserva en estado
+ * deshabilitado estándar Material 3 (opacidad 12%/38%) para evidenciar precondiciones.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RobotSelectionScreen(
     telemetry: TelemetrySnapshot,
+    isDataStale: Boolean = false,
     onOpenConsole: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -129,27 +141,39 @@ fun RobotSelectionScreen(
                             }
                         }
 
+                        val linkLost = isDataStale || telemetry.connectivityStatus != ConnectivityStatus.ONLINE
+                        val linkColor = if (linkLost) semantic.warning else semantic.normal
+                        val linkContainer = if (linkLost) semantic.warningContainer else semantic.normalContainer
+                        val onLinkContainer = if (linkLost) semantic.onWarningContainer else semantic.onNormalContainer
+                        val linkLabel = when {
+                            telemetry.connectivityStatus == ConnectivityStatus.DISCONNECTED ->
+                                "SIN SEÑAL 4G (${telemetry.rssiDbm} dBm)"
+                            isDataStale || telemetry.connectivityStatus == ConnectivityStatus.STALE_DATA ->
+                                "DATOS ANTIGUOS (4G ${telemetry.rssiDbm} dBm)"
+                            else -> "ONLINE (4G LTE ${telemetry.rssiDbm} dBm)"
+                        }
+
                         AssistChip(
                             onClick = onOpenConsole,
                             label = {
                                 Text(
-                                    text = "ONLINE (4G LTE ${telemetry.rssiDbm} dBm)",
+                                    text = linkLabel,
                                     style = TelemetryTextStyles.labelMono
                                 )
                             },
                             leadingIcon = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Wifi,
-                                    contentDescription = "Enlace 4G LTE",
-                                    tint = semantic.normal,
+                                    imageVector = if (linkLost) Icons.Rounded.WifiOff else Icons.Rounded.Wifi,
+                                    contentDescription = "Estado enlace 4G LTE",
+                                    tint = linkColor,
                                     modifier = Modifier.size(16.dp)
                                 )
                             },
                             colors = AssistChipDefaults.assistChipColors(
-                                containerColor = semantic.normalContainer,
-                                labelColor = semantic.onNormalContainer
+                                containerColor = linkContainer,
+                                labelColor = onLinkContainer
                             ),
-                            border = BorderStroke(1.dp, semantic.normal)
+                            border = BorderStroke(1.dp, linkColor)
                         )
 
                         Surface(
@@ -157,6 +181,13 @@ fun RobotSelectionScreen(
                             color = MaterialTheme.colorScheme.surface,
                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                         ) {
+                            val summaryColor = when {
+                                telemetry.operationalState == RobotOperationalState.ALERT_HOLD ||
+                                    telemetry.operationalState == RobotOperationalState.STOPPED -> semantic.critical
+                                linkLost || telemetry.batteryPercent <= RobotSafetyPolicy.LOW_BATTERY_WARNING_PERCENT ->
+                                    semantic.warning
+                                else -> semantic.normal
+                            }
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -166,10 +197,10 @@ fun RobotSelectionScreen(
                                 Text(
                                     text = "Batería: ${telemetry.batteryPercent}% (${telemetry.voltageV}V)  •  Estado: ${telemetry.operationalState.name}",
                                     style = TelemetryTextStyles.bodyMono,
-                                    color = semantic.normal
+                                    color = summaryColor
                                 )
                                 Text(
-                                    text = "Ubicación: WP0 Base Acceso Brasil • Circuito 3.8 km",
+                                    text = "Ubicación: ${telemetry.currentWaypointName} • Circuito 3.8 km (${telemetry.missionProgressPercent}%)",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

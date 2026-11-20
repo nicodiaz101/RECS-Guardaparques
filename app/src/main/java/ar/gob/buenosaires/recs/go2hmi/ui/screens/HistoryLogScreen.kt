@@ -21,6 +21,9 @@ import androidx.compose.material.icons.rounded.LocalFireDepartment
 import androidx.compose.material.icons.rounded.Route
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.WarningAmber
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ElevatedCard
@@ -32,6 +35,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -53,10 +57,17 @@ import java.util.Locale
 private enum class HistoryFilter(val label: String) {
     ALL("Todos"),
     MISSIONS("Misiones"),
+    // Agrupa alertas de foco ígneo e incidentes operativos (obstáculo, batería, cortes 4G)
     FIRE_ALERTS("Alertas Ígneas"),
     COMMANDS("Comandos")
 }
 
+/**
+ * Pantalla 3: Registro de auditoría local persistido en Room (`history_events`).
+ *
+ * Permite filtrar por categoría e incluye confirmación previa antes de vaciar la base
+ * para evitar borrados accidentales durante la operación en campo.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HistoryLogScreen(
@@ -65,6 +76,7 @@ fun HistoryLogScreen(
     modifier: Modifier = Modifier
 ) {
     var selectedFilter by remember { mutableStateOf(HistoryFilter.ALL) }
+    var showClearDialog by remember { mutableStateOf(false) }
     val filteredEvents = remember(events, selectedFilter) {
         when (selectedFilter) {
             HistoryFilter.ALL -> events
@@ -92,11 +104,18 @@ fun HistoryLogScreen(
                 }
             },
             actions = {
-                IconButton(onClick = onClearHistory) {
+                IconButton(
+                    onClick = { showClearDialog = true },
+                    enabled = events.isNotEmpty()
+                ) {
                     Icon(
                         imageVector = Icons.Rounded.DeleteSweep,
                         contentDescription = "Limpiar historial",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        tint = if (events.isNotEmpty()) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                        }
                     )
                 }
             },
@@ -165,6 +184,38 @@ fun HistoryLogScreen(
                 }
             }
         }
+    }
+
+    if (showClearDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearDialog = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            title = { Text("Limpiar historial local") },
+            text = {
+                Text(
+                    "Se eliminarán todos los registros de misiones, alertas y comandos almacenados en la base Room del dispositivo."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showClearDialog = false
+                        onClearHistory()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
+                ) {
+                    Text("Eliminar todo")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearDialog = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
     }
 }
 

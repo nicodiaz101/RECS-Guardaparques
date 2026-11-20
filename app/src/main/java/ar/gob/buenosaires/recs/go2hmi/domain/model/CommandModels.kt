@@ -1,5 +1,9 @@
 package ar.gob.buenosaires.recs.go2hmi.domain.model
 
+/**
+ * Órdenes discretas soportadas por la HMI (sin control por joystick continuo).
+ * Cubre las 7 acciones exigidas por el trabajo práctico.
+ */
 enum class RobotCommandType(val label: String) {
     START_MISSION("Iniciar Misión"),
     PAUSE_MISSION("Pausar Misión"),
@@ -10,21 +14,36 @@ enum class RobotCommandType(val label: String) {
     ACK_ALERT("Reconocer Alerta (ACK)")
 }
 
+/**
+ * Ciclo de vida visible de cada comando enviado desde la consola HMI.
+ * Refleja la regla de seguridad: "una orden enviada no equivale a una orden ejecutada".
+ */
 enum class CommandExecutionState {
+    /** Consola en espera, sin orden en curso. */
     IDLE,
+    /** Orden enviada por enlace 4G, aguardando respuesta/ACK del robot. */
     PENDING,
+    /** El robot validó precondiciones y ejecutó la transición de estado. */
     CONFIRMED,
+    /** El robot rechazó la orden por regla de seguridad o precondición incumplida. */
     REJECTED,
+    /** Tiempo de espera agotado (timeout 3 s) sin respuesta por corte de enlace. */
     NO_RESPONSE
 }
 
+/**
+ * Resultado del último comando emitido por el operador, mostrado en el banner de estado.
+ */
 data class CommandStatusReport(
     val command: RobotCommandType? = null,
     val state: CommandExecutionState = CommandExecutionState.IDLE,
     val message: String = "Consola lista — Esperando orden discreta",
-    val timestampEpochMs: Long = System.currentTimeMillis()
+    val timestampEpochMs: Long = 0L
 )
 
+/**
+ * Los 5 escenarios demostrables exigidos para la evaluación y defensa del TP.
+ */
 enum class SimulationScenario(
     val number: Int,
     val title: String,
@@ -57,6 +76,9 @@ enum class SimulationScenario(
     )
 }
 
+/**
+ * Categoría de registro persistido en la base local Room (`history_events`).
+ */
 enum class HistoryEventCategory(val label: String) {
     MISSION("Misiones"),
     FIRE_ALERT("Alertas Ígneas"),
@@ -64,6 +86,9 @@ enum class HistoryEventCategory(val label: String) {
     INCIDENT("Incidentes")
 }
 
+/**
+ * Modelo de dominio desacoplado de la entidad Room (`HistoryEventEntity`).
+ */
 data class HistoryEventItem(
     val id: Long,
     val timestampEpochMs: Long,

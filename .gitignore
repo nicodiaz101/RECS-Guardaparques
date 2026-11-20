@@ -12,3 +12,5 @@
 *.apk
 *.ap_
 *.aab
+/graphify-out/
+TP-HMI-Ottoman.pdf

@@ -5,6 +5,12 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
+/**
+ * Base de datos local Room (`recs_go2_hmi.db`) para operación 100% offline en campo.
+ *
+ * Exporta su esquema JSON (`app/schemas/.../1.json`) para trazabilidad y futuras migraciones.
+ * Se instancia como Singleton único a través del contenedor de la aplicación (`AppContainer`).
+ */
 @Database(
     entities = [HistoryEventEntity::class],
     version = 1,

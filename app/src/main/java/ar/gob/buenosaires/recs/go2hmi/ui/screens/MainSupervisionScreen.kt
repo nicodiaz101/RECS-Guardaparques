@@ -67,6 +67,7 @@ import ar.gob.buenosaires.recs.go2hmi.domain.model.AlertSeverity
 import ar.gob.buenosaires.recs.go2hmi.domain.model.FireRiskLevel
 import ar.gob.buenosaires.recs.go2hmi.domain.model.RobotCommandType
 import ar.gob.buenosaires.recs.go2hmi.domain.model.SimulationScenario
+import ar.gob.buenosaires.recs.go2hmi.domain.policy.RobotSafetyPolicy
 import ar.gob.buenosaires.recs.go2hmi.ui.components.CommandFeedbackBanner
 import ar.gob.buenosaires.recs.go2hmi.ui.components.HmiVisualState
 import ar.gob.buenosaires.recs.go2hmi.ui.components.HriTrailStatusBar
@@ -79,6 +80,16 @@ import ar.gob.buenosaires.recs.go2hmi.ui.theme.TelemetryTextStyles
 import ar.gob.buenosaires.recs.go2hmi.ui.viewmodel.HmiUiState
 import java.util.Locale
 
+/**
+ * Pantalla 2: Panel principal de supervisión HMI y control discreto del Unitree Go2 EDU.
+ *
+ * Estructura en 5 zonas:
+ * - Zona A: Barra superior con estado operativo, conectividad 4G, antigüedad de paquete y batería.
+ * - Zona B: Tarjeta de mapa táctico (`TacticalMapCard`) sobre circuito Laguna de los Coipos.
+ * - Zona C: Grilla con las 3 variables del servicio de prevención ígnea + barra de estado HRI.
+ * - Zona D: Banner de estado asíncrono de comandos (PENDING / CONFIRMED / REJECTED / NO_RESPONSE).
+ * - Zona E: Selector de escenarios de defensa (1–5) y botonera de órdenes discretas sin joystick.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainSupervisionScreen(
@@ -180,7 +191,7 @@ fun MainSupervisionScreen(
                     )
                 }
 
-                val isLowBatt = telemetry.batteryPercent <= 25
+                val isLowBatt = telemetry.batteryPercent <= RobotSafetyPolicy.LOW_BATTERY_WARNING_PERCENT
                 val battColor = when {
                     isStale -> semantic.warning
                     isLowBatt -> semantic.warning
@@ -343,12 +354,12 @@ fun MainSupervisionScreen(
             // ZONA C: Grilla de las 3 Variables de Servicio + Barra HRI
             val tempState = when {
                 isStale -> HmiVisualState.WARNING
-                telemetry.maxThermalTempC >= 70.0f -> HmiVisualState.CRITICAL
+                telemetry.maxThermalTempC >= RobotSafetyPolicy.THERMAL_LOCKOUT_TEMP_C -> HmiVisualState.CRITICAL
                 else -> HmiVisualState.NORMAL
             }
             val smokeState = when {
                 isStale -> HmiVisualState.WARNING
-                telemetry.smokePpm >= 200 -> HmiVisualState.CRITICAL
+                telemetry.smokePpm >= RobotSafetyPolicy.SMOKE_CRITICAL_PPM -> HmiVisualState.CRITICAL
                 else -> HmiVisualState.NORMAL
             }
             val riskState = when {
@@ -668,7 +679,8 @@ fun MainSupervisionScreen(
     // AlertDialog M3 Crítico (Escenario 5 Foco Ígneo / Escenario 4 Obstáculo)
     val modalAlert = uiState.criticalModalAlert
     if (modalAlert != null) {
-        val isFire = modalAlert.category == AlertCategory.FIRE || telemetry.maxThermalTempC >= 70f
+        val isFire = modalAlert.category == AlertCategory.FIRE ||
+            telemetry.maxThermalTempC >= RobotSafetyPolicy.THERMAL_LOCKOUT_TEMP_C
         AlertDialog(
             onDismissRequest = { onDismissCriticalAlertDialog(modalAlert.id) },
             containerColor = semantic.criticalContainer,

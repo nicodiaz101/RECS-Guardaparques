@@ -58,6 +58,10 @@ import ar.gob.buenosaires.recs.go2hmi.domain.model.SimulationScenario
 import ar.gob.buenosaires.recs.go2hmi.ui.theme.LocalHmiSemanticColors
 import ar.gob.buenosaires.recs.go2hmi.ui.theme.TelemetryTextStyles
 
+/**
+ * Estados visuales estandarizados requeridos por la consigna (normal, deshabilitado,
+ * advertencia y error/crítico).
+ */
 enum class HmiVisualState {
     NORMAL,
     DISABLED,
@@ -65,6 +69,10 @@ enum class HmiVisualState {
     CRITICAL
 }
 
+/**
+ * Dibuja un borde ámbar discontinuo sobre tarjetas o banners cuando la telemetría
+ * entró en modo "DATO ANTIGUO" por pérdida de enlace o timeout >= 5 s.
+ */
 fun Modifier.dashedAmberBorder(
     enabled: Boolean,
     color: Color,
@@ -405,7 +413,7 @@ fun ScenarioSimulatorBottomSheet(
                 color = MaterialTheme.colorScheme.onSurface
             )
             Text(
-                text = "Disparo local offline mediante contratos JSON en Go2SimulationEngine.",
+                text = "Disparo local offline mediante contratos JSON en el simulador.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
