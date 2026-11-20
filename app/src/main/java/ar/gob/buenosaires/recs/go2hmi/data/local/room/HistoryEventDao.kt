@@ -55,8 +55,8 @@ abstract class HistoryEventDao {
     }
 
     /**
-     * Inserta un evento nuevo y conserva como máximo [maxRows] registros recientes
-     * dentro de una misma transacción SQLite para evitar crecimiento ilimitado offline.
+     * Inserta un evento nuevo y conserva hasta [maxRows] registros recientes
+     * en la misma transacción para que la base local no crezca sin límite.
      */
     @Transaction
     open suspend fun insertAndPrune(entity: HistoryEventEntity, maxRows: Int = 200): Long {

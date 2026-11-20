@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * Eventos de dominio emitidos por la fuente de telemetría para ser auditados en Room.
+ * Eventos que emite el simulador para guardarlos en el historial de Room.
  */
 sealed class SimulationDomainEvent {
     data class MissionStarted(
@@ -44,11 +44,11 @@ sealed class SimulationDomainEvent {
 }
 
 /**
- * Abstracción del Data Source del robot dentro de la capa `data`.
+ * Interfaz de acceso al robot/simulador dentro de la capa `data`.
  *
  * Permite que [ar.gob.buenosaires.recs.go2hmi.data.repository.Go2RobotRepositoryImpl]
- * dependa de una interfaz en lugar de acoplarse directamente a la clase concreta
- * [Go2SimulationEngine], habilitando reemplazos o dobles de prueba en tests unitarios.
+ * no dependa directo de la clase concreta [Go2SimulationEngine], facilitando usar
+ * implementaciones falsas en los tests unitarios.
  */
 interface RobotTelemetryDataSource : Closeable {
     val telemetryFlow: StateFlow<TelemetrySnapshot>

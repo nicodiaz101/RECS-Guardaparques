@@ -1,11 +1,10 @@
 package ar.gob.buenosaires.recs.go2hmi.domain.util
 
 /**
- * Abstracción de reloj del dominio.
+ * Interfaz simple para obtener la hora actual en milisegundos.
  *
- * Permite desacoplar el cálculo de tiempos transcurridos (datos antiguos / timeouts)
- * de `System.currentTimeMillis()`, facilitando pruebas unitarias determinísticas
- * sin depender del reloj real del sistema operativo.
+ * Nos permite calcular la antigüedad de los paquetes sin quedar atados a
+ * `System.currentTimeMillis()`, algo muy útil para simular el paso del tiempo en los tests.
  */
 fun interface TimeProvider {
     fun nowEpochMs(): Long

@@ -74,15 +74,15 @@ flowchart TB
 
 | Paquete / Archivo | Responsabilidad |
 |---|---|
-| `RecsGo2Application.kt` | Inicializa el `AppContainer` único del proceso. |
-| `di/AppContainer.kt` | Service locator manual que provee `TimeProvider`, `AppDatabase`, `Go2SimulationEngine` y `Go2RobotRepositoryImpl`. |
-| `MainActivity.kt` | Single-Activity Compose con `NavigationBar` M3 (`Unidades`, `Supervisión HMI`, `Historial Local`) y tema estático `dynamicColor = false`. |
+| `RecsGo2Application.kt` | Inicializa el `AppContainer` único de la app. |
+| `di/AppContainer.kt` | Contenedor manual que provee `TimeProvider`, `AppDatabase`, `Go2SimulationEngine` y `Go2RobotRepositoryImpl`. |
+| `MainActivity.kt` | Activity principal con Compose, `NavigationBar` M3 (`Unidades`, `Supervisión HMI`, `Historial Local`) y tema estático `dynamicColor = false`. |
 | `domain/model/TelemetryModels.kt` | Modelos de telemetría (8 variables base + 3 de servicio ígneo + HRI) y catálogo de waypoints `WP0..WP5`. |
 | `domain/model/CommandModels.kt` | Los 7 comandos discretos, estados (`IDLE`, `PENDING`, `CONFIRMED`, `REJECTED`, `NO_RESPONSE`), los 5 escenarios e ítems de historial. |
 | `domain/policy/RobotSafetyPolicy.kt` | Reglas de seguridad, umbrales, `CommandPermissions` y `validateCommand(...)`. |
 | `domain/repository/Go2RobotRepository.kt` | Contrato puro de operación del robot e historial. |
 | `domain/repository/RobotSimulationController.kt` | Contrato separado para controles de demostración/simulación. |
-| `domain/util/TimeProvider.kt` | Abstracción de reloj para pruebas determinísticas. |
+| `domain/util/TimeProvider.kt` | Interfaz de reloj para poder testear tiempos sin depender de la hora del sistema. |
 | `data/simulator/SimulationJsonContracts.kt` | DTOs y serialización/deserialización `kotlinx.serialization` de telemetría y comandos. |
 | `data/simulator/RobotTelemetryDataSource.kt` | Interfaz de data source y eventos de dominio (`MissionStarted`, `MissionCompleted`, `AlertTriggered`, `AlertAcknowledged`). |
 | `data/simulator/Go2SimulationEngine.kt` | Motor autónomo offline (tick 1s, latencia 450 ms, timeout 3 s, protección térmica, pausas RTH y alertas orgánicas). |
@@ -224,7 +224,7 @@ Accesibles desde los chips `E1`–`E5` o desde el botón **Simulador (1–5)** e
 
 - **Escala de tiempo acelerada:** El circuito de `3.8 km` avanza a razón de `4%` por segundo durante la patrulla (~25 s) y `8%` por segundo durante RTH, para poder demostrar misiones completas en vivo durante la defensa del TP sin esperar ~42 minutos reales a `1.5 m/s`.
 - **Contratos JSON locales sin red:** La serialización/deserialización JSON ocurre en memoria dentro de `Go2SimulationEngine` para cumplir con la operación 100% sin servidor ni internet manteniendo desacoplado el contrato de transporte.
-- **Inyección manual sin Hilt:** Se utilizó un `AppContainer` acotado a `RecsGo2Application` para mantener el grafo de dependencias transparente, liviano y sin generación adicional de código.
+- **Inyección manual sin Hilt:** Se usó un `AppContainer` en `RecsGo2Application` para manejar las dependencias compartidas de forma simple y liviana, sin sumar librerías de DI ni generación de código extra.
 - **Botón `Reanudar` clickable en `ALERT_HOLD` térmico:** Decisión deliberada de UX/demostración para poder exhibir ante la cátedra el flujo de rechazo explícito (`REJECTED`) cuando el operador intenta avanzar hacia un foco activo.
 - **Alcance de pruebas:** Se incluyen pruebas unitarias de JVM sobre `Go2SimulationEngine`, `RobotSafetyPolicy` y `OperatorViewModel` (`./gradlew testDebugUnitTest`), sin pruebas instrumentadas en emulador para UI/Room.
 

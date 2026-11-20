@@ -80,7 +80,7 @@ class OperatorViewModel(
         val dismissedModalAlertId: String?
     )
 
-    // Flujos internos estrictamente privados; la UI solo observa uiState (read-only StateFlow)
+    // Flujos internos privados; la UI solo lee uiState (StateFlow de solo lectura)
     private val currentTimeMillisFlow = MutableStateFlow(timeProvider.nowEpochMs())
     private val pendingConfirmationFlow = MutableStateFlow<RobotCommandType?>(null)
     private val dismissedModalAlertIdFlow = MutableStateFlow<String?>(null)
@@ -145,7 +145,7 @@ class OperatorViewModel(
         val stale = simFlags.forcedDisconnected ||
             elapsedSec >= RobotSafetyPolicy.STALE_TELEMETRY_THRESHOLD_SEC
 
-        // Si superó el umbral de frescura sin desconexión explícita, reflejar STALE_DATA en el estado
+        // Si pasaron más de 5s sin paquetes nuevos, marcamos el enlace como STALE_DATA
         val effectiveTelemetry = if (stale && core.telemetry.connectivityStatus == ConnectivityStatus.ONLINE) {
             core.telemetry.copy(connectivityStatus = ConnectivityStatus.STALE_DATA)
         } else {

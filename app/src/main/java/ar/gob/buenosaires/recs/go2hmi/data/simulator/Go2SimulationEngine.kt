@@ -140,7 +140,7 @@ class Go2SimulationEngine(
                             nextBattery <= RobotSafetyPolicy.MIN_MISSION_BATTERY_PERCENT
 
                     if (nextProgress < 100 && crossedLowBatteryThreshold) {
-                        // Alerta orgánica cuando la batería cae al umbral mínimo durante patrulla
+                        // Si la batería baja al 20% durante la patrulla, generamos la alerta automáticamente
                         val pos = interpolateCircuitPosition(nextProgress)
                         val wp = RecsTrailWaypoints.byIndex(pos.waypointIndex)
                         val alert = RobotAlert(
@@ -305,11 +305,11 @@ class Go2SimulationEngine(
     }
 
     /**
-     * Procesa una orden discreta a través del contrato JSON del robot.
+     * Procesa una orden discreta pasando por el contrato JSON del simulador.
      *
-     * Se ejecuta dentro del scope del motor para que, incluso si la corrutina llamadora
-     * (p.ej. ViewModel) se cancela en mitad de la latencia simulada, el estado de comando
-     * resuelva limpiamente y nunca quede atascado en `PENDING`.
+     * Corre en el scope propio del motor para que, aunque el ViewModel se cancele
+     * durante la latencia simulada, el estado del comando termine de responder y no
+     * quede trabado en `PENDING`.
      */
     override suspend fun processCommand(
         command: RobotCommandType,

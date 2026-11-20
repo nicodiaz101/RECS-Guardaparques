@@ -71,8 +71,8 @@ class Go2RobotRepositoryImpl(
     }
 
     override suspend fun sendCommand(command: RobotCommandType, alertIdToAck: String?) {
-        // Ejecutamos el envío y su registro en Room sobre repoScope para garantizar
-        // que la orden y su auditoría local completen aunque el ViewModel sea destruido.
+        // Corremos el envío y el guardado en Room sobre repoScope para que no se corten
+        // a mitad de camino si se recrea o destruye el ViewModel.
         repoScope.async {
             val result = dataSource.processCommand(command = command, alertIdToAck = alertIdToAck)
             val snap = dataSource.telemetryFlow.value
