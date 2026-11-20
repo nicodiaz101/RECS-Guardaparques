@@ -56,11 +56,13 @@ object RobotSafetyPolicy {
     /** Antigüedad máxima (segundos) de un paquete antes de marcar la HMI como DATO ANTIGUO. */
     const val STALE_TELEMETRY_THRESHOLD_SEC = 5L
 
-    /** Indica si el robot está estacionado en la Base Acceso Brasil (WP0) sin misión activa. */
+    /**
+     * Indica si el robot está estacionado en la Base Acceso Brasil (WP0) sin misión en curso
+     * (tanto al inicio con 0% como al completar el circuito al 100%).
+     */
     fun isAtSafeBase(telemetry: TelemetrySnapshot): Boolean =
         telemetry.operationalState == RobotOperationalState.IDLE &&
-            telemetry.currentWaypointIndex == 0 &&
-            telemetry.missionProgressPercent == 0
+            telemetry.currentWaypointIndex == 0
 
     /** Indica si la cámara IR detecta un foco térmico por encima del umbral de seguridad. */
     fun hasThermalHazard(telemetry: TelemetrySnapshot): Boolean =

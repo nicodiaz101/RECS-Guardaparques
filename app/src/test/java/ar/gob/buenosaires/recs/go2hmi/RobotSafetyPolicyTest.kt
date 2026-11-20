@@ -143,4 +143,20 @@ class RobotSafetyPolicyTest {
         assertTrue(perms.canReturnToSafe)
         assertTrue(perms.highlightRth)
     }
+
+    @Test
+    fun completedMissionAtBaseDisablesRthAndAllowsNewStart() {
+        val perms = RobotSafetyPolicy.evaluatePermissions(
+            telemetry = baseSnapshot(
+                state = RobotOperationalState.IDLE,
+                waypointIndex = 0,
+                progress = 100
+            ),
+            isCommandPending = false
+        )
+        assertTrue(perms.canStartMission)
+        assertFalse(perms.canReturnToSafe)
+        assertFalse(perms.highlightRth)
+        assertFalse(perms.canCancelMission)
+    }
 }

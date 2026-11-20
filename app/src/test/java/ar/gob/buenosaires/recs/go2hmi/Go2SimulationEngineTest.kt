@@ -86,6 +86,10 @@ class Go2SimulationEngineTest {
         assertEquals(RobotOperationalState.IDLE, finalSnap.operationalState)
         assertEquals(0, finalSnap.currentWaypointIndex)
         assertEquals(0.0f, finalSnap.linearSpeedMps, 0.01f)
+
+        // Ya está estacionado en WP0 -> RTH debe rechazarse para no hacer un retorno falso
+        val rthAtBase = engine.processCommand(RobotCommandType.RETURN_TO_SAFE)
+        assertEquals(CommandExecutionState.REJECTED, rthAtBase.state)
         engine.close()
     }
 
